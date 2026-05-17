@@ -1,0 +1,11 @@
+*.swp
+*.swo
+*.bak
+*~
+.DS_Store
+/oem_acpi/
+
+# uncompressed Windows registry dump (~300 MiB, exceeds GitHub file-size
+# limit). The compressed .reg.zst (~30 MiB) is committed instead.
+# Recreate the original with: zstd -d win11_dump/HKEY_LOCAL_MACHINE.reg.zst
+win11_dump/HKEY_LOCAL_MACHINE.reg

@@ -1,0 +1,57 @@
+--- /home/x2e/Projects/HONOR_ZQC-P_M1010/reference/SSDT27_orig.dsl	2026-05-17 18:26:59.029245064 +0300
++++ /home/x2e/Projects/HONOR_ZQC-P_M1010/patch/SSDT27_TPD0.dsl	2026-05-17 18:26:59.034244572 +0300
+@@ -5,20 +5,20 @@
+  * 
+  * Disassembling to symbolic ASL+ operators
+  *
+- * Disassembly of SSDT27_orig.aml
++ * Disassembly of SSDT27_TPD0.aml
+  *
+  * Original Table Header:
+  *     Signature        "SSDT"
+- *     Length           0x00005C9C (23708)
++ *     Length           0x0000599C (22940)
+  *     Revision         0x02
+- *     Checksum         0xE5
++ *     Checksum         0xE7
+  *     OEM ID           "HONOR"
+  *     OEM Table ID     "I2C_DEVT"
+- *     OEM Revision     0x00001000 (4096)
++ *     OEM Revision     0x00002000 (8192)
+  *     Compiler ID      "INTL"
+- *     Compiler Version 0x20200717 (538969879)
++ *     Compiler Version 0x20251212 (539300370)
+  */
+-DefinitionBlock ("", "SSDT", 2, "HONOR", "I2C_DEVT", 0x00001000)
++DefinitionBlock ("", "SSDT", 2, "HONOR", "I2C_DEVT", 0x00002000)
+ {
+     External (_SB_.GGOV, MethodObj)    // 1 Arguments
+     External (_SB_.GRXE, MethodObj)    // 2 Arguments
+@@ -114,10 +114,10 @@
+         Zero, 
+         0x38, 
+         One, 
+-        0x01, 
+-        0x00, 
+-        0x01, 
+-        0x00
++        One, 
++        Zero, 
++        One, 
++        Zero
+     })
+     Name (TDPH, Package (0x02)
+     {
+@@ -604,7 +604,11 @@
+                     }
+             })
+             CreateWordField (SBGF, 0x17, INT1)
+-            INT1 = GNUM (0x001A088A)
++            Method (_INI, 0, NotSerialized)  // _INI: Initialize
++            {
++                INT1 = GNUM (0x001A088A)
++            }
++
+             Method (_STA, 0, NotSerialized)  // _STA: Status
+             {
+                 If ((TPDT == One))
