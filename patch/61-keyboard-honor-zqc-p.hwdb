@@ -1,0 +1,19 @@
+# HONOR MagicBook Pro 14 AI (ZQC-P / M1010) — Fn+F7 mic-mute key
+#
+# The BIOS emits Fn+F7 as PS/2 scancode 0xe078 over the legacy i8042 path
+# (not as a WMI hotkey, despite huawei-wmi already declaring KEY_MICMUTE
+# in its sparse keymap). Without an explicit mapping atkbd reports
+# "Unknown key pressed (translated set 2, code 0xf8)" in dmesg and
+# nothing reaches userspace.
+#
+# This entry maps 0xe078 to KEY_MICMUTE (248). PipeWire / PulseAudio then
+# toggle the default-source mute, and the platform::micmute LED follows
+# automatically via the audio-micmute trigger that huawei-wmi already
+# sets as default on this device.
+#
+# After editing, run:
+#   sudo systemd-hwdb update
+#   sudo udevadm trigger --subsystem-match=input --action=change
+
+evdev:atkbd:dmi:bvn*:bvr*:bd*:svnHONOR:pnZQC-P:*
+ KEYBOARD_KEY_e078=micmute
