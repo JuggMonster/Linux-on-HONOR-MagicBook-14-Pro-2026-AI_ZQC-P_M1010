@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# apply_patch.sh — install ACPI override, kernel cmdline fix, and Fn-key
-# hwdb mapping for HONOR MagicBook Pro 14 AI (ZQC-P, model M1010).
+# apply_patch.sh — install ACPI override and kernel cmdline fix for
+# HONOR MagicBook Pro 14 AI (ZQC-P, model M1010).
 #
 # Fixes:
 #   1) Touchpad (Goodix TOPS0102 on I2C1) and touchscreen (FocalTech FTSC1000
@@ -11,15 +11,12 @@
 #   2) Internal keyboard quirks (key repeats / dropouts) — i8042.dumbkbd=1
 #      kernel command line argument suppresses atkbd command sending
 #      (see README for the trade-off with Caps Lock LED).
-#   3) Fn+F7 mic-mute key — BIOS emits PS/2 scancode 0xe078 which atkbd
-#      doesn't know. We supply a hwdb entry (KEYBOARD_KEY_e078=micmute)
-#      AND a systemd unit that calls /usr/bin/setkeycodes on boot/resume.
-#      Why both: systemd-udev's "keyboard" builtin uses EVIOCSKEYCODE_V2,
-#      which atkbd rejects with -EINVAL for extended scancodes (0xE0xx),
-#      so the hwdb path doesn't actually apply the mapping on this driver.
-#      setkeycodes uses the legacy kbd ioctl, which works. We keep the
-#      hwdb file so the mapping starts working automatically if the
-#      kernel/systemd API gap is closed in the future.
+#
+# Fn+F7 mic-mute already works out of the box on this hardware via the
+# huawei-wmi driver (separate "Huawei WMI hotkeys" input device emits
+# KEY_MICMUTE on every press; PipeWire toggles the source mute and the
+# platform::micmute LED follows via the audio-micmute trigger). No
+# keymap or udev/systemd plumbing is needed. See README for details.
 #
 # Targets: CachyOS / Arch-like systems with mkinitcpio + Limine.
 # Must be run as root.
@@ -41,30 +38,18 @@ req mkinitcpio
 req install
 req sed
 req cp
-req systemd-hwdb
-req udevadm
-req systemctl
-req setkeycodes
 
 mkdir -p "$BACKUP"
 
 #────────────────────────────────────────────────────────────────────────
-# [1/7] Backup everything we are about to touch.
+# [1/5] Backup everything we are about to touch.
 #────────────────────────────────────────────────────────────────────────
-echo "[1/7] Backup → $BACKUP"
+echo "[1/5] Backup → $BACKUP"
 cp -a /etc/mkinitcpio.conf                   "$BACKUP/mkinitcpio.conf"
 [[ -d /usr/lib/firmware/acpi ]] && \
     cp -a /usr/lib/firmware/acpi             "$BACKUP/firmware-acpi"
 [[ -d /etc/initcpio/install ]] && \
     cp -a /etc/initcpio/install              "$BACKUP/initcpio-install"
-[[ -d /etc/udev/hwdb.d ]] && \
-    cp -a /etc/udev/hwdb.d                   "$BACKUP/udev-hwdb.d"
-[[ -f /etc/systemd/system/honor-fnf7-keymap.service ]] && \
-    cp -a /etc/systemd/system/honor-fnf7-keymap.service \
-                                             "$BACKUP/honor-fnf7-keymap.service"
-[[ -f /usr/lib/systemd/system-sleep/honor-fnf7-keymap.sh ]] && \
-    cp -a /usr/lib/systemd/system-sleep/honor-fnf7-keymap.sh \
-                                             "$BACKUP/honor-fnf7-keymap.sh"
 [[ -f /etc/default/limine ]] && \
     cp -a /etc/default/limine                "$BACKUP/limine.default"
 [[ -f /boot/limine.conf ]] && \
@@ -72,30 +57,20 @@ cp -a /etc/mkinitcpio.conf                   "$BACKUP/mkinitcpio.conf"
 echo "    OK"
 
 #────────────────────────────────────────────────────────────────────────
-# [2/7] Install patched SSDT, mkinitcpio hook, keyboard hwdb,
-#       and Fn+F7 keymap units (boot service + sleep hook).
+# [2/5] Install patched SSDT and mkinitcpio install hook.
 #────────────────────────────────────────────────────────────────────────
-echo "[2/7] Install patched SSDT + mkinitcpio hook + keyboard hwdb + keymap units"
+echo "[2/5] Install patched SSDT + mkinitcpio hook"
 install -Dm0644 "$PATCH_DIR/SSDT27_TPD0.aml" \
                 /usr/lib/firmware/acpi/SSDT27_TPD0.aml
 install -Dm0755 "$PATCH_DIR/acpi_override.install" \
                 /etc/initcpio/install/acpi_override
-install -Dm0644 "$PATCH_DIR/61-keyboard-honor-zqc-p.hwdb" \
-                /etc/udev/hwdb.d/61-keyboard-honor-zqc-p.hwdb
-install -Dm0644 "$PATCH_DIR/honor-fnf7-keymap.service" \
-                /etc/systemd/system/honor-fnf7-keymap.service
-install -Dm0755 "$PATCH_DIR/honor-fnf7-keymap-sleep.sh" \
-                /usr/lib/systemd/system-sleep/honor-fnf7-keymap.sh
 echo "    /usr/lib/firmware/acpi/SSDT27_TPD0.aml"
 echo "    /etc/initcpio/install/acpi_override"
-echo "    /etc/udev/hwdb.d/61-keyboard-honor-zqc-p.hwdb"
-echo "    /etc/systemd/system/honor-fnf7-keymap.service"
-echo "    /usr/lib/systemd/system-sleep/honor-fnf7-keymap.sh"
 
 #────────────────────────────────────────────────────────────────────────
-# [3/7] Wire acpi_override into HOOKS=… (right after autodetect).
+# [3/5] Wire acpi_override into HOOKS=… (right after autodetect).
 #────────────────────────────────────────────────────────────────────────
-echo "[3/7] Patch /etc/mkinitcpio.conf"
+echo "[3/5] Patch /etc/mkinitcpio.conf"
 if ! grep -qE '^HOOKS=.*\bacpi_override\b' /etc/mkinitcpio.conf; then
     sed -i 's/\bautodetect\b/autodetect acpi_override/' /etc/mkinitcpio.conf
     echo "    + acpi_override added to HOOKS"
@@ -110,9 +85,9 @@ fi
 echo "    HOOKS=$(grep -E '^HOOKS=' /etc/mkinitcpio.conf)"
 
 #────────────────────────────────────────────────────────────────────────
-# [4/7] Append i8042.dumbkbd=1 to Limine default cmdline (idempotent).
+# [4/5] Append i8042.dumbkbd=1 to Limine default cmdline (idempotent).
 #────────────────────────────────────────────────────────────────────────
-echo "[4/7] Patch /etc/default/limine (i8042.dumbkbd=1)"
+echo "[4/5] Patch /etc/default/limine (i8042.dumbkbd=1)"
 if [[ -f /etc/default/limine ]]; then
     if ! grep -qE 'i8042\.dumbkbd=1' /etc/default/limine; then
         sed -i 's|^\(KERNEL_CMDLINE\[default\]+="[^"]*\)"$|\1 i8042.dumbkbd=1"|' \
@@ -128,29 +103,9 @@ else
 fi
 
 #────────────────────────────────────────────────────────────────────────
-# [5/7] Rebuild hwdb binary cache and apply to running kernel.
+# [5/5] Rebuild initramfs and regenerate Limine config.
 #────────────────────────────────────────────────────────────────────────
-echo "[5/7] Refresh hwdb cache + udev"
-systemd-hwdb update
-udevadm trigger --subsystem-match=input --action=change
-echo "    /etc/udev/hwdb.bin regenerated"
-
-#────────────────────────────────────────────────────────────────────────
-# [6/7] Enable Fn+F7 keymap service and apply it now via setkeycodes.
-#────────────────────────────────────────────────────────────────────────
-echo "[6/7] Enable honor-fnf7-keymap service + apply mapping now"
-systemctl daemon-reload
-systemctl enable honor-fnf7-keymap.service
-# Apply immediately so the user doesn't have to reboot to test Fn+F7.
-/usr/bin/setkeycodes e078 248
-echo "    e078 → KEY_MICMUTE (248) applied; service will reapply on every boot"
-echo "    sleep-hook /usr/lib/systemd/system-sleep/honor-fnf7-keymap.sh will"
-echo "    reapply after suspend/hibernate"
-
-#────────────────────────────────────────────────────────────────────────
-# [7/7] Rebuild initramfs and regenerate Limine config.
-#────────────────────────────────────────────────────────────────────────
-echo "[7/7] Rebuild initramfs"
+echo "[5/5] Rebuild initramfs"
 if command -v limine-update >/dev/null; then
     limine-update
 else
@@ -178,10 +133,8 @@ After reboot, verify:
   cat /proc/cmdline | grep i8042
     expect: includes i8042.dumbkbd=1
 
-  # press Fn+F7 — mic should mute/unmute and the F7 LED should follow:
+  # press Fn+F7 — mic should mute/unmute and the F7 LED should follow
+  # (works out of the box via huawei-wmi; no extra setup needed):
   cat /sys/class/leds/platform::micmute/trigger
     expect: contains [audio-micmute]
-
-  systemctl status honor-fnf7-keymap.service
-    expect: Active: active (exited); ExecStart=/usr/bin/setkeycodes e078 248 succeeded
 EOF

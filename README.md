@@ -1,12 +1,17 @@
 # HONOR MagicBook Pro 14 AI (ZQC-P, M1010) — Linux fixes
 
-ACPI override + kernel-cmdline patch + udev hwdb mapping that gets the
-**touchpad**, **touchscreen** and the **Fn+F7 microphone-mute key (with
-LED)** working on a HONOR MagicBook Pro 14 AI under Linux, plus a small
-i8042 quirk for the internal keyboard. The cooling system also has
-unusual default behaviour on Linux — see [Cooling system / fan
-behaviour](#cooling-system--fan-behaviour) for what is normal and what
-isn't.
+ACPI override + kernel-cmdline patch that gets the **touchpad** and
+**touchscreen** working on a HONOR MagicBook Pro 14 AI under Linux, plus
+a small i8042 quirk for the internal keyboard.
+
+The **Fn+F7 microphone-mute key with its LED** works out of the box on
+mainline Linux thanks to the `huawei-wmi` driver — no extra setup is
+required. See [Mic-mute key (Fn+F7) and its LED](#mic-mute-key-fnf7-and-its-led)
+for details.
+
+The cooling system also has unusual default behaviour on Linux — see
+[Cooling system / fan behaviour](#cooling-system--fan-behaviour) for what
+is normal and what isn't.
 
 The repo contains everything needed to:
 
@@ -99,42 +104,29 @@ traffic and fixes the misbehaviour — at the cost of the Caps Lock LED no
 longer following the kernel's caps-lock state. See [Caps Lock LED
 known limitation](#caps-lock-led--known-limitation) for the trade-off.
 
-Finally, the **Fn+F7 mic-mute key** emits PS/2 scancode `0xe078` through
-the legacy i8042 path, which atkbd doesn't know by default:
+**Fn+F7 (mic-mute) is *not* in the list of things this patch fixes.** It
+works on stock mainline Linux: the `huawei-wmi` driver registers a
+separate input device called *"Huawei WMI hotkeys"* and emits
+`KEY_MICMUTE` on every Fn+F7 press. PipeWire then toggles the default
+source's mute and the LED on the F7 key follows via the `audio-micmute`
+trigger. The only visible side-effect is a single line per press in
+`dmesg`:
 
 ```
 atkbd serio0: Unknown key pressed (translated set 2, code 0xf8 on
 isa0060/serio0).
-atkbd serio0: Use 'setkeycodes e078 <keycode>' to make it known.
 ```
 
-The obvious fix — a udev hwdb entry mapping `e078` → `KEY_MICMUTE` —
-doesn't actually take effect on this driver. systemd-udev's `keyboard`
-builtin applies hwdb keymaps via the `EVIOCSKEYCODE_V2` ioctl on the
-evdev node, and `atkbd` rejects it with `-EINVAL` for any extended
-scancode (`0xE0xx`). In the udev journal this shows up as:
-
-```
-event2: keyboard: mapping scan code 57464 (0xe078) to key code 248 (0xf8)
-event2: Failed to call EVIOCSKEYCODE with scan code 0xe078, and key code 248:
-        Invalid argument
-```
-
-`/usr/bin/setkeycodes` uses the older kbd ioctls (`KDSKBENT`), which
-*do* work on the same driver for the same scancode. So we install both:
-
-* `patch/61-keyboard-honor-zqc-p.hwdb` — declarative `KEYBOARD_KEY_e078=micmute`
-  entry. Harmless today, ready to start working as soon as the
-  kernel/systemd API gap is fixed.
-* `patch/honor-fnf7-keymap.service` + `patch/honor-fnf7-keymap-sleep.sh` —
-  a oneshot systemd unit that runs `setkeycodes e078 248` on boot, and
-  a `systemd-sleep` hook that does the same after resume (the mapping
-  is lost when atkbd re-initialises serio0 on wake).
-
-With the keymap in place the audio stack (PipeWire / PulseAudio) toggles
-the default-source mute when `KEY_MICMUTE` arrives, and the LED on the
-F7 key follows automatically via the `audio-micmute` LED trigger that
-`huawei-wmi` already sets up.
+That comes from the BIOS *also* echoing the key on the legacy i8042
+bus, where atkbd doesn't know what to do with scancode `0xE078`. It is
+cosmetic noise — the message is harmless and can be ignored. **Don't
+"fix" it by mapping `0xE078` to `KEY_MICMUTE` on atkbd**; that creates
+a second input source for the same press, GNOME / Mutter then receives
+two `KEY_MICMUTE` events per push and toggles the mute twice, making
+the key appear non-functional. (Earlier revisions of this patch did
+exactly that — the duplicate channel was the source of "Fn+F7
+occasionally stops working". If you have those files left over from
+older installs, see [Removing an old Fn+F7 keymap fix](#removing-an-old-fnf7-keymap-fix).)
 
 ---
 
@@ -154,28 +146,16 @@ under `/root/honor-zqcp-fix-backup-*` on each apply).
 ### What `apply_patch.sh` does
 
 1. Backs up `/etc/mkinitcpio.conf`, `/etc/default/limine`,
-   `/boot/limine.conf`, `/etc/initcpio/install/`, `/etc/udev/hwdb.d/`,
-   the existing Fn+F7 keymap unit/sleep-hook (if any),
-   and `/usr/lib/firmware/acpi/`.
+   `/boot/limine.conf`, `/etc/initcpio/install/`, and
+   `/usr/lib/firmware/acpi/`.
 2. Installs `patch/SSDT27_TPD0.aml` → `/usr/lib/firmware/acpi/SSDT27_TPD0.aml`.
 3. Installs `patch/acpi_override.install` → `/etc/initcpio/install/acpi_override`.
-4. Installs `patch/61-keyboard-honor-zqc-p.hwdb` →
-   `/etc/udev/hwdb.d/61-keyboard-honor-zqc-p.hwdb` (declarative Fn+F7 mic-mute
-   mapping; works automatically when atkbd/EVIOCSKEYCODE_V2 gap is fixed).
-5. Installs `patch/honor-fnf7-keymap.service` →
-   `/etc/systemd/system/`, and
-   `patch/honor-fnf7-keymap-sleep.sh` →
-   `/usr/lib/systemd/system-sleep/honor-fnf7-keymap.sh` — these apply the
-   Fn+F7 scancode via legacy `setkeycodes` on boot and after every resume.
-6. Adds the `acpi_override` hook right after `autodetect` in
+4. Adds the `acpi_override` hook right after `autodetect` in
    `/etc/mkinitcpio.conf` (only if absent).
-7. Appends `i8042.dumbkbd=1` to `KERNEL_CMDLINE[default]` in
+5. Appends `i8042.dumbkbd=1` to `KERNEL_CMDLINE[default]` in
    `/etc/default/limine` (only if absent).
-8. Runs `systemd-hwdb update` + `udevadm trigger`, then
-   `systemctl enable --now honor-fnf7-keymap.service` so the mic-mute key
-   works immediately without a reboot. Finally rebuilds the bootloader
-   config via `limine-update` (falls back to `mkinitcpio -P` if Limine
-   isn't used).
+6. Rebuilds the bootloader config via `limine-update` (falls back to
+   `mkinitcpio -P` if Limine isn't used).
 
 After a reboot, sanity checks:
 
@@ -206,20 +186,19 @@ cat /sys/class/leds/platform::micmute/trigger
 
 ## Mic-mute key (Fn+F7) and its LED
 
-Press Fn+F7: the F7 LED lights up, your default ALSA / PipeWire source
-gets muted; press again: LED off, mic live. The signal path:
+Press Fn+F7: the F7 LED lights up, your default PipeWire source gets
+muted; press again: LED off, mic live. The signal path:
 
 ```
 Fn+F7
  │
- │  i8042 → atkbd     scancode 0xe078
+ │  WMI hot-key event   (BIOS → ACPI WMI)
  │  ──────────────────────────────────
- │  setkeycodes via honor-fnf7-keymap.service (kbd ioctl path)
- │  → atkbd internal keymap learns e078 → KEY_MICMUTE
- │  → KEY_MICMUTE event on /dev/input/event2
+ │  huawei-wmi sparse keymap (in-kernel)
+ │  → KEY_MICMUTE on input device "Huawei WMI hotkeys"
  │
- │  desktop / PipeWire / wireplumber binds KEY_MICMUTE
- │  → toggles default source mute
+ │  GNOME / KDE / Mutter / KWin grab XF86AudioMicMute
+ │  → toggle PipeWire default source mute via pactl/D-Bus
  │
  │  audio stack updates ALSA mixer state
  │  → kernel snd driver calls ledtrig_audio_set(MICMUTE)
@@ -230,20 +209,48 @@ Fn+F7
 LED on the F7 key
 ```
 
-Everything except the keymap step is in mainline kernel + huawei-wmi +
-PipeWire and works out of the box on this hardware (verified on
-`linux-cachyos 7.0.8` with `sof-audio-pci-intel-ptl`). The missing piece
-is the scancode → keycode mapping, which `honor-fnf7-keymap.service`
-installs at every boot and `honor-fnf7-keymap.sh` restores after every
-resume.
+Everything in this chain is already in mainline kernel and the standard
+audio/desktop stack — no patches, hwdb entries, udev rules, or systemd
+units are required (verified on `linux-cachyos 7.0.8` with
+`sof-audio-pci-intel-ptl`, PipeWire 1.6.5, GNOME 49 Wayland).
 
-**Why not just hwdb?** It does ship in the patch (and is the textbook
-fix), but as of `linux 7.0.8` / `systemd 260` the atkbd driver rejects
-`EVIOCSKEYCODE_V2` for extended scancodes — the call systemd-udev's
-`keyboard` builtin uses to apply hwdb entries. The legacy `setkeycodes`
-tool uses a different kernel path (`KDSKBENT`) that *is* implemented for
-extended scancodes, so we drive the mapping through that until the
-driver gains V2 support.
+**Why the obvious-looking hwdb fix is wrong.** The BIOS additionally
+echoes the key as PS/2 scancode `0xE078` on the legacy i8042 bus, which
+shows up as `atkbd serio0: Unknown key pressed (translated set 2, code
+0xf8)` in dmesg. The textbook reaction is to drop a udev hwdb entry
+mapping `0xE078` → `KEY_MICMUTE`. **Don't do that on this laptop.** It
+would give you a second input source emitting `KEY_MICMUTE` on top of
+the WMI device's event, so each press would toggle the mute twice
+(net effect: nothing), making Fn+F7 appear broken. The `dmesg` warning
+is cosmetic; the `huawei-wmi` device is the canonical source.
+
+As a side note, the in-tree `atkbd` driver rejects `EVIOCSKEYCODE_V2`
+(the ioctl systemd-udev uses to apply hwdb keymaps) with `-EINVAL` for
+any extended scancode (`0xE0xx`) as of `linux 7.0.8` / `systemd 260`,
+so a hwdb-only mapping wouldn't take effect at all in any case —
+only the legacy `setkeycodes` path through `KDSKBENT` works, which
+makes the duplicate-channel pitfall easier to fall into.
+
+### Removing an old Fn+F7 keymap fix
+
+If you installed an earlier revision of this patch (or followed a
+similar guide) and now have Fn+F7 toggling twice per press, undo the
+keymap files:
+
+```bash
+sudo systemctl disable --now honor-fnf7-keymap.service 2>/dev/null
+sudo rm -f /etc/systemd/system/honor-fnf7-keymap.service \
+           /usr/lib/systemd/system-sleep/honor-fnf7-keymap.sh \
+           /etc/udev/hwdb.d/61-keyboard-honor-zqc-p.hwdb
+sudo systemctl daemon-reload
+sudo systemd-hwdb update
+sudo udevadm trigger --subsystem-match=input --action=change
+# Optional: silence the dmesg "Unknown key" line for the current boot
+sudo setkeycodes e078 0
+```
+
+After this Fn+F7 will toggle exactly once per press via the
+`huawei-wmi` device.
 
 If you ever manually write to `/sys/class/leds/platform::micmute/brightness`
 (e.g. for testing), the kernel automatically detaches the
@@ -451,8 +458,7 @@ HONOR_ZQC-P_M1010/
 ├── patch/
 │   ├── SSDT27_TPD0.aml                # ready-to-install ACPI override (binary)
 │   ├── SSDT27_TPD0.dsl                # human-readable source
-│   ├── acpi_override.install          # mkinitcpio install hook (early CPIO)
-│   └── 61-keyboard-honor-zqc-p.hwdb   # udev hwdb: Fn+F7 → KEY_MICMUTE
+│   └── acpi_override.install          # mkinitcpio install hook (early CPIO)
 ├── build/
 │   ├── build_patch.sh              # iasl + checksum recompute + revision bump
 │   └── extract_oem_acpi.sh         # dump live ACPI tables for new investigations
@@ -532,7 +538,7 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 | **Built-in keyboard** | ACPI `MSFT0001`/`PNP0303` → `i8042`, "AT Translated Set 2 keyboard" | Microsoft PS/2 Keyboard | ✅ *needs `i8042.dumbkbd=1`* |
 | Caps Lock LED | (keyboard-internal, driven via atkbd `SET_LEDS`) | (same) | ❌ *blocked by `i8042.dumbkbd=1` — see [Caps Lock LED](#caps-lock-led--known-limitation)* |
 | Hotkey / function-key WMI | `huawei_wmi`, "Huawei WMI hotkeys" input | Huawei PC Manager hotkey driver | ✅ |
-| **Fn+F7 mic-mute key + LED** | atkbd PS/2 scancode `e078` → `KEY_MICMUTE`; LED at `/sys/class/leds/platform::micmute` with `audio-micmute` trigger | Huawei PC Manager mic toggle | ✅ *needs `patch/61-keyboard-honor-zqc-p.hwdb`* |
+| **Fn+F7 mic-mute key + LED** | `huawei_wmi` WMI hot-key → `KEY_MICMUTE`; LED at `/sys/class/leds/platform::micmute` with `audio-micmute` trigger | Huawei PC Manager mic toggle | ✅ *works out of the box* |
 | PS/2 mouse port (legacy) | ACPI `MSFT0003`, status=0 | (disabled by firmware) | ➖ disabled in firmware (correctly) |
 | ACPI Video / brightness | `acpi-video`, "Video Bus" input | Intel Display Control | ✅ |
 
