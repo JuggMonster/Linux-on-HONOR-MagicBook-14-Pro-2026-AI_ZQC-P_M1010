@@ -108,10 +108,33 @@ isa0060/serio0).
 atkbd serio0: Use 'setkeycodes e078 <keycode>' to make it known.
 ```
 
-A tiny udev hwdb entry (`patch/61-keyboard-honor-zqc-p.hwdb`) maps it to
-`KEY_MICMUTE`. The audio stack (PipeWire / PulseAudio) then toggles the
-default-source mute and the LED on the F7 key follows automatically via
-the `audio-micmute` LED trigger that `huawei-wmi` already sets up.
+The obvious fix — a udev hwdb entry mapping `e078` → `KEY_MICMUTE` —
+doesn't actually take effect on this driver. systemd-udev's `keyboard`
+builtin applies hwdb keymaps via the `EVIOCSKEYCODE_V2` ioctl on the
+evdev node, and `atkbd` rejects it with `-EINVAL` for any extended
+scancode (`0xE0xx`). In the udev journal this shows up as:
+
+```
+event2: keyboard: mapping scan code 57464 (0xe078) to key code 248 (0xf8)
+event2: Failed to call EVIOCSKEYCODE with scan code 0xe078, and key code 248:
+        Invalid argument
+```
+
+`/usr/bin/setkeycodes` uses the older kbd ioctls (`KDSKBENT`), which
+*do* work on the same driver for the same scancode. So we install both:
+
+* `patch/61-keyboard-honor-zqc-p.hwdb` — declarative `KEYBOARD_KEY_e078=micmute`
+  entry. Harmless today, ready to start working as soon as the
+  kernel/systemd API gap is fixed.
+* `patch/honor-fnf7-keymap.service` + `patch/honor-fnf7-keymap-sleep.sh` —
+  a oneshot systemd unit that runs `setkeycodes e078 248` on boot, and
+  a `systemd-sleep` hook that does the same after resume (the mapping
+  is lost when atkbd re-initialises serio0 on wake).
+
+With the keymap in place the audio stack (PipeWire / PulseAudio) toggles
+the default-source mute when `KEY_MICMUTE` arrives, and the LED on the
+F7 key follows automatically via the `audio-micmute` LED trigger that
+`huawei-wmi` already sets up.
 
 ---
 
@@ -131,19 +154,28 @@ under `/root/honor-zqcp-fix-backup-*` on each apply).
 ### What `apply_patch.sh` does
 
 1. Backs up `/etc/mkinitcpio.conf`, `/etc/default/limine`,
-   `/boot/limine.conf`, `/etc/initcpio/install/`, `/etc/udev/hwdb.d/`
+   `/boot/limine.conf`, `/etc/initcpio/install/`, `/etc/udev/hwdb.d/`,
+   the existing Fn+F7 keymap unit/sleep-hook (if any),
    and `/usr/lib/firmware/acpi/`.
 2. Installs `patch/SSDT27_TPD0.aml` → `/usr/lib/firmware/acpi/SSDT27_TPD0.aml`.
 3. Installs `patch/acpi_override.install` → `/etc/initcpio/install/acpi_override`.
 4. Installs `patch/61-keyboard-honor-zqc-p.hwdb` →
-   `/etc/udev/hwdb.d/61-keyboard-honor-zqc-p.hwdb` (Fn+F7 mic-mute mapping).
-5. Adds the `acpi_override` hook right after `autodetect` in
+   `/etc/udev/hwdb.d/61-keyboard-honor-zqc-p.hwdb` (declarative Fn+F7 mic-mute
+   mapping; works automatically when atkbd/EVIOCSKEYCODE_V2 gap is fixed).
+5. Installs `patch/honor-fnf7-keymap.service` →
+   `/etc/systemd/system/`, and
+   `patch/honor-fnf7-keymap-sleep.sh` →
+   `/usr/lib/systemd/system-sleep/honor-fnf7-keymap.sh` — these apply the
+   Fn+F7 scancode via legacy `setkeycodes` on boot and after every resume.
+6. Adds the `acpi_override` hook right after `autodetect` in
    `/etc/mkinitcpio.conf` (only if absent).
-6. Appends `i8042.dumbkbd=1` to `KERNEL_CMDLINE[default]` in
+7. Appends `i8042.dumbkbd=1` to `KERNEL_CMDLINE[default]` in
    `/etc/default/limine` (only if absent).
-7. Runs `systemd-hwdb update` + `udevadm trigger` so the mic-mute mapping
-   takes effect immediately, then `limine-update` (falls back to
-   `mkinitcpio -P` if Limine isn't used).
+8. Runs `systemd-hwdb update` + `udevadm trigger`, then
+   `systemctl enable --now honor-fnf7-keymap.service` so the mic-mute key
+   works immediately without a reboot. Finally rebuilds the bootloader
+   config via `limine-update` (falls back to `mkinitcpio -P` if Limine
+   isn't used).
 
 After a reboot, sanity checks:
 
@@ -182,7 +214,8 @@ Fn+F7
  │
  │  i8042 → atkbd     scancode 0xe078
  │  ──────────────────────────────────
- │  hwdb (61-keyboard-honor-zqc-p.hwdb)
+ │  setkeycodes via honor-fnf7-keymap.service (kbd ioctl path)
+ │  → atkbd internal keymap learns e078 → KEY_MICMUTE
  │  → KEY_MICMUTE event on /dev/input/event2
  │
  │  desktop / PipeWire / wireplumber binds KEY_MICMUTE
@@ -197,11 +230,20 @@ Fn+F7
 LED on the F7 key
 ```
 
-Everything except the hwdb mapping is in mainline kernel + huawei-wmi +
+Everything except the keymap step is in mainline kernel + huawei-wmi +
 PipeWire and works out of the box on this hardware (verified on
-`linux-cachyos 7.0.8` with `sof-audio-pci-intel-ptl`). The only missing
-piece is the one-line scancode mapping, which is what
-`patch/61-keyboard-honor-zqc-p.hwdb` provides.
+`linux-cachyos 7.0.8` with `sof-audio-pci-intel-ptl`). The missing piece
+is the scancode → keycode mapping, which `honor-fnf7-keymap.service`
+installs at every boot and `honor-fnf7-keymap.sh` restores after every
+resume.
+
+**Why not just hwdb?** It does ship in the patch (and is the textbook
+fix), but as of `linux 7.0.8` / `systemd 260` the atkbd driver rejects
+`EVIOCSKEYCODE_V2` for extended scancodes — the call systemd-udev's
+`keyboard` builtin uses to apply hwdb entries. The legacy `setkeycodes`
+tool uses a different kernel path (`KDSKBENT`) that *is* implemented for
+extended scancodes, so we drive the mapping through that until the
+driver gains V2 support.
 
 If you ever manually write to `/sys/class/leds/platform::micmute/brightness`
 (e.g. for testing), the kernel automatically detaches the
