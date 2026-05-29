@@ -11,6 +11,12 @@
 #   2) Internal keyboard quirks (key repeats / dropouts) — i8042.dumbkbd=1
 #      kernel command line argument suppresses atkbd command sending
 #      (see README for the trade-off with Caps Lock LED).
+#   3) Analog 3.5mm-jack headset microphone unusable — PCI SSID 1ee7:209d
+#      is missing from sound/hda/codecs/realtek/alc269.c quirk table.
+#      Step [6/6] rebuilds snd-hda-codec-alc269.ko with the SND_PCI_QUIRK
+#      entry our hardware needs (matches the existing HONOR BRB-X M1010
+#      sibling); see patch/install-alc269-fix.sh and the upstream patch
+#      at patch/alc269-honor-zqc-p-m1010.patch.
 #
 # Fn+F7 mic-mute already works out of the box on this hardware via the
 # huawei-wmi driver (separate "Huawei WMI hotkeys" input device emits
@@ -103,15 +109,34 @@ else
 fi
 
 #────────────────────────────────────────────────────────────────────────
-# [5/5] Rebuild initramfs and regenerate Limine config.
+# [5/6] Rebuild initramfs and regenerate Limine config.
 #────────────────────────────────────────────────────────────────────────
-echo "[5/5] Rebuild initramfs"
+echo "[5/6] Rebuild initramfs"
 if command -v limine-update >/dev/null; then
     limine-update
 else
     mkinitcpio -P
     echo "    note: limine-update not found — if you use Limine, run it now"
     echo "    or rebuild your bootloader config manually."
+fi
+
+#────────────────────────────────────────────────────────────────────────
+# [6/6] Build + install ALC256 codec quirk for the 3.5mm-jack headset mic.
+# Fetches the running kernel's alc269.c from the upstream stable tree,
+# adds SND_PCI_QUIRK(0x1ee7, 0x209d, "HONOR ZQC-P M1010", …) — pin 0x19
+# is wired to the combo jack mic on this board, identical to the existing
+# BRB-X M1010 sibling — and replaces /lib/modules/.../snd-hda-codec-alc269.ko.zst.
+# Original is backed up to /root/snd-hda-codec-alc269.ko.zst.orig.
+# The script is idempotent: if the in-tree module already carries the
+# quirk (e.g. after upstream merge), it exits without rebuilding.
+#────────────────────────────────────────────────────────────────────────
+echo "[6/6] Apply ALC256 headset-mic quirk (snd-hda-codec-alc269 rebuild)"
+if bash "$PATCH_DIR/install-alc269-fix.sh"; then
+    echo "    OK"
+else
+    echo "    [warn] ALC256 quirk install failed — touchpad/touchscreen fix is"
+    echo "    still applied; only the analog headset mic on the 3.5mm jack will"
+    echo "    stay unavailable. Inspect patch/install-alc269-fix.sh output above."
 fi
 
 cat <<EOF
@@ -137,4 +162,12 @@ After reboot, verify:
   # (works out of the box via huawei-wmi; no extra setup needed):
   cat /sys/class/leds/platform::micmute/trigger
     expect: contains [audio-micmute]
+
+  # 3.5mm-jack headset mic — should appear once you plug in a CTIA-wired
+  # headset and PipeWire/wireplumber rescans:
+  pactl list short sources | grep -i headset
+    expect: a HiFi__Headset__source endpoint
+
+  # After every kernel update, re-run patch/install-alc269-fix.sh
+  # so the codec quirk is rebuilt against the new headers.
 EOF

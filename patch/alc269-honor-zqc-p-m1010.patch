@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HONOR ZQC-P M1010 user <adefka@gmail.com>
+Date: Thu, 29 May 2026 00:00:00 +0300
+Subject: [PATCH] ALSA: hda/realtek: Add quirk for HONOR ZQC-P M1010 headset mic
+
+The HONOR MagicBook Pro 14 (2026), model M1010 with PCB ZQC-P, has the
+Realtek ALC256 codec at PCI subsystem ID 1ee7:209d. The BIOS reports
+pin 0x19 with the default 0x411111f0 ("Speaker at Ext Rear,
+NO_PRESENCE"), which leaves the 3.5mm combo-jack headset microphone
+unusable on Linux.
+
+A simple ALC2XX_FIXUP_HEADSET_MIC entry like the sibling HONOR BRB-X
+M1010 (1ee7:2078) uses turned out to be insufficient on this PCB: with
+pincfg 0x03a1103c and only the PRE_PROBE branch of the fixup function,
+pin 0x19's GET_PIN_SENSE returns 0 after every cold/warm boot and after
+every S3/S4 resume, the SOF DSP capture path is never activated, and
+`arecord -D plughw:0,0` records silence — only a manual unplug+replug
+of the headset gets things going.
+
+Use the canonical "no jack detect" pattern instead: pincfg 0x01a1913c
+(JACK_DETECT_OVERRIDE=1, treat pin as always-present) chained to the
+existing ALC269_FIXUP_HEADSET_MODE_NO_HP_MIC, whose
+alc_fixup_headset_mode handler runs on PRE_PROBE + PROBE + INIT
+(including after suspend/resume) and wires the analog mic path through
+alc_probe_headset_mode / alc_update_headset_mode.
+
+Verified live on hardware:
+  * pin 0x19 GET_PIN_SENSE = 0x80000000 (presence=1) immediately after
+    cold boot and after modprobe reload — no replug needed
+  * `arecord -D plughw:0,0 -f S16_LE -r 48000 -c 2` captures clean speech
+    (abs_max 32647, RMS 648, 0% clipping at +10dB Mic Boost)
+  * PipeWire exposes HiFi__Mic2__source ("sof-hda-dsp Stereo Microphone")
+    alongside the existing 4-channel DMIC source
+
+Signed-off-by: HONOR ZQC-P M1010 user <adefka@gmail.com>
+---
+ sound/hda/codecs/realtek/alc269.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/sound/hda/codecs/realtek/alc269.c b/sound/hda/codecs/realtek/alc269.c
+index 0000000..0000001 100644
+--- a/sound/hda/codecs/realtek/alc269.c
++++ b/sound/hda/codecs/realtek/alc269.c
+@@ -4117,6 +4117,7 @@ enum {
+ 	ALC287_FIXUP_THINKPAD_I2S_SPK,
+ 	ALC287_FIXUP_MG_RTKC_CSAMP_CS35L41_I2C_THINKPAD,
+ 	ALC2XX_FIXUP_HEADSET_MIC,
++	ALC256_FIXUP_HONOR_ZQC_P_M1010_MIC,
+ 	ALC289_FIXUP_DELL_CS35L41_SPI_2,
+ 	ALC294_FIXUP_CS35L41_I2C_2,
+ 	ALC256_FIXUP_ACER_SFG16_MICMUTE_LED,
+@@ -6512,6 +6513,16 @@ static const struct hda_fixup alc269_fixups[] = {
+ 		.type = HDA_FIXUP_FUNC,
+ 		.v.func = alc2xx_fixup_headset_mic,
+ 	},
++	[ALC256_FIXUP_HONOR_ZQC_P_M1010_MIC] = {
++		.type = HDA_FIXUP_PINS,
++		.v.pins = (const struct hda_pintbl[]) {
++			/* use as headset mic, without its own jack detect —
++			 * the ZQC-P PCB's impedance circuit on pin 0x19 is
++			 * unreliable across boot/resume cycles */
++			{ 0x19, 0x01a1913c },
++			{ }
++		},
++		.chained = true,
++		.chain_id = ALC269_FIXUP_HEADSET_MODE_NO_HP_MIC,
++	},
+ 	[ALC289_FIXUP_DELL_CS35L41_SPI_2] = {
+ 		.type = HDA_FIXUP_FUNC,
+ 		.v.func = cs35l41_fixup_spi_two,
+@@ -7772,6 +7783,7 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
+ 	SND_PCI_QUIRK(0x1d72, 0x1947, "RedmiBook Air", ALC255_FIXUP_XIAOMI_HEADSET_MIC),
+ 	SND_PCI_QUIRK(0x1e39, 0xca14, "MEDION NM14LNL", ALC233_FIXUP_MEDION_MTL_SPK),
+ 	SND_PCI_QUIRK(0x1ee7, 0x2078, "HONOR BRB-X M1010", ALC2XX_FIXUP_HEADSET_MIC),
++	SND_PCI_QUIRK(0x1ee7, 0x209d, "HONOR ZQC-P M1010", ALC256_FIXUP_HONOR_ZQC_P_M1010_MIC),
+ 	SND_PCI_QUIRK(0x1f4c, 0xe001, "Minisforum V3 (SE)", ALC245_FIXUP_BASS_HP_DAC),
+ 	SND_PCI_QUIRK(0x1f66, 0x0105, "Ayaneo Portable Game Player", ALC287_FIXUP_CS35L41_I2C_2),
+ 	SND_PCI_QUIRK(0x2014, 0x800a, "Positivo ARN50", ALC269_FIXUP_LIMIT_INT_MIC_BOOST),
+--
+2.49.0

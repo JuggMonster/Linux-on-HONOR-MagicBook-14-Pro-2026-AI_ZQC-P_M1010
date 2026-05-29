@@ -4,6 +4,8 @@
 *~
 .DS_Store
 /oem_acpi/
+/.omc/
+/.claude/
 
 # uncompressed Windows registry dump (~300 MiB, exceeds GitHub file-size
 # limit). The compressed .reg.zst (~30 MiB) is committed instead.

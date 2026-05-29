@@ -1,17 +1,29 @@
 # HONOR MagicBook Pro 14 AI (ZQC-P, M1010) — Linux fixes
 
-ACPI override + kernel-cmdline patch that gets the **touchpad** and
-**touchscreen** working on a HONOR MagicBook Pro 14 AI under Linux, plus
-a small i8042 quirk for the internal keyboard.
+What this repo fixes on a HONOR MagicBook Pro 14 AI under Linux:
 
-The **Fn+F7 microphone-mute key with its LED** works out of the box on
-mainline Linux thanks to the `huawei-wmi` driver — no extra setup is
-required. See [Mic-mute key (Fn+F7) and its LED](#mic-mute-key-fnf7-and-its-led)
-for details.
+1. **Touchpad and touchscreen** — patched SSDT so the firmware's
+   `I2C_DEVT` table loads instead of failing with `AE_AML_INTERNAL`.
+2. **Internal keyboard repeats / dropouts** — `i8042.dumbkbd=1` on the
+   kernel cmdline.
+3. **3.5 mm-jack analog headset microphone** — rebuild of
+   `snd-hda-codec-alc269.ko` with a `SND_PCI_QUIRK` entry for our PCI
+   subsystem ID `1ee7:209d`, see
+   [3.5mm-jack headset microphone](#35mm-jack-headset-microphone).
 
-The cooling system also has unusual default behaviour on Linux — see
-[Cooling system / fan behaviour](#cooling-system--fan-behaviour) for what
-is normal and what isn't.
+What works out of the box and is **not** touched by this patch:
+
+- **Fn+F7 mic-mute key + LED** for the built-in microphone array
+  (DMIC) — handled by the in-tree `huawei-wmi` driver. See
+  [Fn+F7 mic-mute key](#fnf7-mic-mute-key).
+- **Built-in microphone array (DMIC)**, speakers, headphone output,
+  WebCam, Wi-Fi, Bluetooth.
+
+Known limitations and their causes are documented at the end of each
+section.
+
+The cooling system also has unusual default behaviour on Linux —
+see [Cooling system / fan behaviour](#cooling-system--fan-behaviour).
 
 The repo contains everything needed to:
 
@@ -104,29 +116,13 @@ traffic and fixes the misbehaviour — at the cost of the Caps Lock LED no
 longer following the kernel's caps-lock state. See [Caps Lock LED
 known limitation](#caps-lock-led--known-limitation) for the trade-off.
 
-**Fn+F7 (mic-mute) is *not* in the list of things this patch fixes.** It
-works on stock mainline Linux: the `huawei-wmi` driver registers a
-separate input device called *"Huawei WMI hotkeys"* and emits
-`KEY_MICMUTE` on every Fn+F7 press. PipeWire then toggles the default
-source's mute and the LED on the F7 key follows via the `audio-micmute`
-trigger. The only visible side-effect is a single line per press in
-`dmesg`:
-
-```
-atkbd serio0: Unknown key pressed (translated set 2, code 0xf8 on
-isa0060/serio0).
-```
-
-That comes from the BIOS *also* echoing the key on the legacy i8042
-bus, where atkbd doesn't know what to do with scancode `0xE078`. It is
-cosmetic noise — the message is harmless and can be ignored. **Don't
-"fix" it by mapping `0xE078` to `KEY_MICMUTE` on atkbd**; that creates
-a second input source for the same press, GNOME / Mutter then receives
-two `KEY_MICMUTE` events per push and toggles the mute twice, making
-the key appear non-functional. (Earlier revisions of this patch did
-exactly that — the duplicate channel was the source of "Fn+F7
-occasionally stops working". If you have those files left over from
-older installs, see [Removing an old Fn+F7 keymap fix](#removing-an-old-fnf7-keymap-fix).)
+A separate problem on this hardware is that the 3.5 mm combo jack's
+**analog headset microphone** is unusable on stock Linux — the BIOS
+reports the codec pin as `NO_PRESENCE` and no `SND_PCI_QUIRK` for our
+PCI subsystem ID `1ee7:209d` exists upstream yet. `apply_patch.sh`
+ships a rebuild of `snd-hda-codec-alc269.ko` that adds the missing
+quirk; see [3.5mm-jack headset microphone](#35mm-jack-headset-microphone)
+for what was wrong and what was verified.
 
 ---
 
@@ -156,6 +152,13 @@ under `/root/honor-zqcp-fix-backup-*` on each apply).
    `/etc/default/limine` (only if absent).
 6. Rebuilds the bootloader config via `limine-update` (falls back to
    `mkinitcpio -P` if Limine isn't used).
+7. Runs `patch/install-alc269-fix.sh` which fetches the running
+   kernel's `alc269.c` from the upstream stable tree, adds our
+   `SND_PCI_QUIRK` entry, builds `snd-hda-codec-alc269.ko`
+   out-of-tree against the installed kernel headers, and replaces
+   `/lib/modules/$(uname -r)/kernel/sound/hda/codecs/realtek/snd-hda-codec-alc269.ko.zst`
+   (the original is saved as `/root/snd-hda-codec-alc269.ko.zst.orig`).
+   This step is idempotent and re-runs cleanly after every kernel update.
 
 After a reboot, sanity checks:
 
@@ -176,66 +179,69 @@ sudo dmesg | grep -iE 'i2c.hid|hid-multitouch'
 cat /proc/cmdline | grep i8042
 #   → ... i8042.dumbkbd=1
 
-# press Fn+F7 once; the F7 microphone icon should light up, mic should
-# mute, status should toggle in your audio applet. Then:
-cat /sys/class/leds/platform::micmute/trigger
-#   → ... [audio-micmute] ...   (square brackets mark active trigger)
+# ALC256 quirk picked up our entry:
+sudo dmesg | grep 'picked fixup.*1ee7:209d'
+#   → snd_hda_codec_alc269 ehdaudio0D0: ALC256: picked fixup for PCI SSID 1ee7:209d
+
+# Plug a headset into the 3.5mm jack:
+pactl list short sources | grep -iv monitor
+#   → ...HiFi__Mic1__source    (built-in DMIC array)
+#   → ...HiFi__Mic2__source    (analog headset mic — the new one)
 ```
 
 ---
 
-## Mic-mute key (Fn+F7) and its LED
+## Fn+F7 mic-mute key
 
-Press Fn+F7: the F7 LED lights up, your default PipeWire source gets
-muted; press again: LED off, mic live. The signal path:
+**Works on stock mainline Linux**, no patch needed. The `huawei-wmi`
+driver registers a separate input device called *"Huawei WMI hotkeys"*
+which emits `KEY_MICMUTE` (= `XF86AudioMicMute`) on every press; the
+desktop's audio shortcut binding toggles the PipeWire default source
+mute; the F7 LED follows via the `audio-micmute` LED trigger that
+`huawei-wmi` registers on `/sys/class/leds/platform::micmute`.
 
-```
-Fn+F7
- │
- │  WMI hot-key event   (BIOS → ACPI WMI)
- │  ──────────────────────────────────
- │  huawei-wmi sparse keymap (in-kernel)
- │  → KEY_MICMUTE on input device "Huawei WMI hotkeys"
- │
- │  GNOME / KDE / Mutter / KWin grab XF86AudioMicMute
- │  → toggle PipeWire default source mute via pactl/D-Bus
- │
- │  audio stack updates ALSA mixer state
- │  → kernel snd driver calls ledtrig_audio_set(MICMUTE)
- │
- │  led trigger "audio-micmute" attached by huawei-wmi
- │  → /sys/class/leds/platform::micmute/brightness flips
- ▼
-LED on the F7 key
-```
+Verified on `linux-cachyos 7.0.10-1` with `sof-audio-pci-intel-ptl`,
+PipeWire 1.6.6, GNOME 49 Wayland and niri.
 
-Everything in this chain is already in mainline kernel and the standard
-audio/desktop stack — no patches, hwdb entries, udev rules, or systemd
-units are required (verified on `linux-cachyos 7.0.8` with
-`sof-audio-pci-intel-ptl`, PipeWire 1.6.5, GNOME 49 Wayland).
+**Two gotchas, each with a definite cause:**
 
-**Why the obvious-looking hwdb fix is wrong.** The BIOS additionally
-echoes the key as PS/2 scancode `0xE078` on the legacy i8042 bus, which
-shows up as `atkbd serio0: Unknown key pressed (translated set 2, code
-0xf8)` in dmesg. The textbook reaction is to drop a udev hwdb entry
-mapping `0xE078` → `KEY_MICMUTE`. **Don't do that on this laptop.** It
-would give you a second input source emitting `KEY_MICMUTE` on top of
-the WMI device's event, so each press would toggle the mute twice
-(net effect: nothing), making Fn+F7 appear broken. The `dmesg` warning
-is cosmetic; the `huawei-wmi` device is the canonical source.
+1. **`dmesg` prints `atkbd serio0: Unknown key pressed (translated set 2,
+   code 0xf8 on isa0060/serio0)` on every Fn+F7 press.** The BIOS
+   echoes the key both on the WMI hot-key bus *and* on legacy i8042 as
+   PS/2 scancode `0xE078`. `atkbd` has no mapping for it. This is
+   cosmetic — nothing in the audio stack reads from `atkbd` for
+   `KEY_MICMUTE`. Do not add an `hwdb` / `setkeycodes` entry to silence
+   it: that creates a second `KEY_MICMUTE` source, the desktop toggles
+   the mute twice per press, and Fn+F7 appears broken. The legacy
+   `setkeycodes` path is the only one that actually takes effect for
+   extended scancodes on current `atkbd` — a pure `hwdb` rule is
+   rejected with `-EINVAL` — but neither should be applied here.
+   Earlier revisions of this patch shipped exactly that mistake; if
+   you have leftover files from them, see
+   [Removing an old Fn+F7 keymap fix](#removing-an-old-fnf7-keymap-fix).
 
-As a side note, the in-tree `atkbd` driver rejects `EVIOCSKEYCODE_V2`
-(the ioctl systemd-udev uses to apply hwdb keymaps) with `-EINVAL` for
-any extended scancode (`0xE0xx`) as of `linux 7.0.8` / `systemd 260`,
-so a hwdb-only mapping wouldn't take effect at all in any case —
-only the legacy `setkeycodes` path through `KDSKBENT` works, which
-makes the duplicate-channel pitfall easier to fall into.
+2. **The LED follows only the built-in DMIC array's mute, not the
+   analog headset mic's mute.** On this hardware the audio chain is
+   owned by the SOF DSP; the `audio-micmute` LED trigger is updated
+   from the SOF DMIC mute path only. When the analog 3.5 mm headset
+   mic (the source added by [section below](#35mm-jack-headset-microphone))
+   is selected as default, Fn+F7 still toggles the correct source's
+   mute (the desktop notification is right), but the F7 LED does not
+   change. Investigated and not fixed at the `alc269.c` quirk-table
+   layer — a proper fix needs either modifying
+   `sound/hda/codecs/realtek/realtek.c` (broader change with
+   ALSA-maintainer review) or adding the equivalent hook on the SOF
+   skl_hda_dsp_generic side. Practical workaround until then: keep the
+   DMIC as the system default and only switch to the headset mic from
+   inside the specific app that needs it (Telegram per-call selector
+   etc.). Fn+F7 then keeps toggling the DMIC and the LED stays
+   correct, while the app captures from the headset.
 
 ### Removing an old Fn+F7 keymap fix
 
 If you installed an earlier revision of this patch (or followed a
-similar guide) and now have Fn+F7 toggling twice per press, undo the
-keymap files:
+similar guide) and now have Fn+F7 toggling twice per press, remove
+the leftover keymap files:
 
 ```bash
 sudo systemctl disable --now honor-fnf7-keymap.service 2>/dev/null
@@ -245,25 +251,114 @@ sudo rm -f /etc/systemd/system/honor-fnf7-keymap.service \
 sudo systemctl daemon-reload
 sudo systemd-hwdb update
 sudo udevadm trigger --subsystem-match=input --action=change
-# Optional: silence the dmesg "Unknown key" line for the current boot
-sudo setkeycodes e078 0
+sudo setkeycodes e078 0   # silence the dmesg line for the current boot
 ```
 
-After this Fn+F7 will toggle exactly once per press via the
-`huawei-wmi` device.
-
-If you ever manually write to `/sys/class/leds/platform::micmute/brightness`
-(e.g. for testing), the kernel automatically detaches the
-`audio-micmute` trigger and switches it to `none`. Restore it with:
+If you ever write to `/sys/class/leds/platform::micmute/brightness`
+manually (e.g. for testing), the kernel detaches the `audio-micmute`
+trigger and switches it to `none`. Restore it with:
 
 ```bash
 echo audio-micmute | sudo tee /sys/class/leds/platform::micmute/trigger
 ```
 
-A reboot also restores it, since `huawei-wmi` hard-codes
-`audio-micmute` as the default trigger.
+A reboot also restores the trigger because `huawei-wmi` re-applies it
+on probe.
 
-### Caps Lock LED — known limitation
+---
+
+## 3.5mm-jack headset microphone
+
+**Symptom on stock mainline Linux:** plugging a 3.5 mm CTIA headset
+into the combo jack — headphone output works, microphone is not
+exposed. Only the built-in `HiFi__Mic1__source` (DMIC array) appears
+in PipeWire; the codec analog capture device `pcm0c HDA Analog` exists
+but captures silence.
+
+**Cause:** the Realtek ALC256 codec on this board has PCI subsystem ID
+`1ee7:209d`, which is **not** in the `SND_PCI_QUIRK` table in
+`sound/hda/codecs/realtek/alc269.c`. With no quirk applied, the BIOS
+default pin configs `0x411111f0` ("Speaker at Ext Rear, NO_PRESENCE")
+on nodes 0x18 / 0x19 / 0x1a / 0x1b are taken at face value, codec
+autoconfig finds zero input pins, and no analog mic input is wired
+into the SOF DSP capture topology.
+
+**Sibling HONOR boards with the same ALC256 codec are already in the
+quirk table** — `1ee7:2078` (BRB-X M1010) and `1ee7:2081` (MRB-XXX
+M1020). Ours, `1ee7:209d` (ZQC-P), is not. The hardware itself is
+analogous: pin 0x19 is wired to the headset mic.
+
+**Why the BRB-X-style one-line `ALC2XX_FIXUP_HEADSET_MIC` isn't
+enough on this board.** That fixup uses pincfg `0x03a1103c`
+(`JACK_DETECT_OVERRIDE=0`) and only handles `HDA_FIXUP_ACT_PRE_PROBE`.
+Verified on hardware: with that simpler fixup, pin 0x19's
+`GET_PIN_SENSE` returns 0 immediately after every cold boot, warm
+reboot and S3/S4 resume; the SOF DSP analog capture path is never
+activated; `arecord -D plughw:0,0` records silence — until the user
+physically unplugs and replugs the headset, which fires the codec's
+unsolicited jack event and gets things going. The ZQC-P PCB's
+impedance-detect circuit on pin 0x19 is unreliable across reset
+cycles.
+
+**The shipped fix.** A new fixup `ALC256_FIXUP_HONOR_ZQC_P_M1010_MIC`
+that:
+
+1. sets pin 0x19 to pincfg `0x01a1913c` (`JACK_DETECT_OVERRIDE=1` —
+   treat as always-present, bypass the unreliable impedance circuit),
+2. chains to the existing `ALC269_FIXUP_HEADSET_MODE_NO_HP_MIC` so
+   that the full `alc_fixup_headset_mode_no_hp_mic` lifecycle runs at
+   PRE_PROBE, PROBE *and* INIT (including S3/S4 resume), wiring the
+   analog mic path through `alc_probe_headset_mode` and
+   `alc_update_headset_mode`.
+
+The upstream-ready patch is `patch/alc269-honor-zqc-p-m1010.patch`.
+The runtime applier `patch/install-alc269-fix.sh` reproduces it
+against the running kernel's own `alc269.c` and rebuilds the codec
+module out-of-tree against `linux-*-headers`. It is invoked from step
+6 of `apply_patch.sh` and is re-runnable after every kernel update;
+it no-ops once the upstream patch has actually landed.
+
+**Verified on hardware:**
+
+```text
+# pin sense is "always present" immediately after module load,
+# no unplug/replug needed:
+$ hda-verb /dev/snd/hwC0D0 0x19 GET_PIN_SENSE 0x00
+nid = 0x19, verb = 0xf09, param = 0x00
+value = 0x80000000
+
+# new HDA analog capture device:
+$ ls /proc/asound/card0/pcm*c
+pcm0c   # HDA Analog (* new *)
+pcm6c   # DMIC Raw
+
+# PipeWire exposes a second mic source:
+$ pactl list short sources | grep -v monitor
+... HiFi__Mic1__source   s32le 4ch 48000Hz   # DMIC array
+... HiFi__Mic2__source   s32le 2ch 48000Hz   # analog headset mic
+
+# voice capture at +10dB Headset Mic Boost, Capture Volume 50/63:
+$ arecord -D plughw:0,0 -d 4 -f S16_LE -r 48000 -c 2 voice.wav
+$ python3 -c "import wave,struct; \
+    w = wave.open('voice.wav','rb'); \
+    s = struct.unpack(f'<{w.getnframes()*2}h', w.readframes(w.getnframes())); \
+    print(f'abs_max={max(abs(x) for x in s)} RMS={(sum(x*x for x in s)/len(s))**.5:.0f}')"
+abs_max=32647 RMS=648    # clean speech, 0% clipping
+```
+
+**Known limitations:**
+
+- The F7 LED does **not** follow when the headset mic source is the
+  active one. See gotcha #2 in [Fn+F7 mic-mute key](#fnf7-mic-mute-key)
+  above.
+- The OEM may roll out new firmware revisions that ship a different
+  PCI subsystem ID. Re-run `apply_patch.sh` and confirm
+  `dmesg | grep 'picked fixup.*1ee7:209d'` still matches your live
+  hardware after a firmware update.
+
+---
+
+## Caps Lock LED — known limitation
 
 The Caps Lock LED **does not light up** with this patch applied, because
 the `i8042.dumbkbd=1` cmdline argument that we add to fix the internal
@@ -538,7 +633,7 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 | **Built-in keyboard** | ACPI `MSFT0001`/`PNP0303` → `i8042`, "AT Translated Set 2 keyboard" | Microsoft PS/2 Keyboard | ✅ *needs `i8042.dumbkbd=1`* |
 | Caps Lock LED | (keyboard-internal, driven via atkbd `SET_LEDS`) | (same) | ❌ *blocked by `i8042.dumbkbd=1` — see [Caps Lock LED](#caps-lock-led--known-limitation)* |
 | Hotkey / function-key WMI | `huawei_wmi`, "Huawei WMI hotkeys" input | Huawei PC Manager hotkey driver | ✅ |
-| **Fn+F7 mic-mute key + LED** | `huawei_wmi` WMI hot-key → `KEY_MICMUTE`; LED at `/sys/class/leds/platform::micmute` with `audio-micmute` trigger | Huawei PC Manager mic toggle | ✅ *works out of the box* |
+| **Fn+F7 mic-mute key** | `huawei_wmi` WMI hot-key → `KEY_MICMUTE`; LED at `/sys/class/leds/platform::micmute` with `audio-micmute` trigger | Huawei PC Manager mic toggle | ✅ *works out of the box*; LED only follows DMIC mute, not the analog headset mic — see [Fn+F7 mic-mute key](#fnf7-mic-mute-key) |
 | PS/2 mouse port (legacy) | ACPI `MSFT0003`, status=0 | (disabled by firmware) | ➖ disabled in firmware (correctly) |
 | ACPI Video / brightness | `acpi-video`, "Video Bus" input | Intel Display Control | ✅ |
 
@@ -548,7 +643,8 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 |---|---|---|---|
 | HD-Audio + DSP (SOF) | PCI `8086:e428`, `sof-audio-pci-intel-ptl`, card `sofhdadsp` (HDA Analog + 3× HDMI) | Realtek HD Audio + Intel SST | ✅ |
 | Speakers / headphone jack | ALSA `sof-hda-dsp Headphone` | (same as above) | ✅ |
-| Microphone array (DMIC) | SOF DMIC capture | Intel Smart Sound DMIC | ✅ |
+| Microphone array (DMIC) | SOF DMIC capture, `HiFi__Mic1__source` (4ch) | Intel Smart Sound DMIC | ✅ |
+| 3.5mm-jack headset microphone | ALC256 pin 0x19, `HiFi__Mic2__source` (2ch stereo) | Intel SST + Realtek HD Audio | ✅ *needs this patch* — see [3.5mm-jack headset microphone](#35mm-jack-headset-microphone) |
 
 ### Sensors / thermal
 
