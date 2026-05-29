@@ -45,8 +45,8 @@
 #      exposed via any WMI setter, no OEM-level disable possible. Step
 #      [8/8] applies a kernel patch to huawei-wmi.c that detects the
 #      storm pair pattern (two 0x287 within `micmute_storm_window_ms`
-#      = default 1000 ms) and drops both events; legitimate single
-#      Fn+F7 press emits normally with at most 1 s latency. Set
+#      = default 2000 ms) and drops both events; legitimate single
+#      Fn+F7 press emits normally with at most 2 s latency. Set
 #      `micmute_storm_window_ms=0` via /sys to disable the filter.
 #      See patch/install-huawei-wmi-fix.sh and
 #      patch/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch.
@@ -269,7 +269,7 @@ After reboot, verify:
   modinfo -F parm huawei_wmi | grep micmute_storm_window_ms
     expect: micmute_storm_window_ms:EC privacy-storm window (ms) ... (int)
   cat /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
-    expect: 1000  (override at runtime by writing a new value)
+    expect: 2000  (override at runtime by writing a new value)
 
   # When an EC privacy storm fires, dmesg gets a paired "code 0xf8 on
   # isa0060/serio0" burst regardless of the filter. With the filter the

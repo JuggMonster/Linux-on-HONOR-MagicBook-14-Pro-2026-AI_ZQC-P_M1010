@@ -232,7 +232,7 @@ under `/root/honor-zqcp-fix-backup-*` on each apply).
    as an overlay (the in-tree module is left untouched and the
    original is saved as `/root/huawei-wmi.ko.zst.orig`). The new
    module exposes a runtime-tunable `micmute_storm_window_ms`
-   parameter (default 1000 ms; 0 disables the filter). Same
+   parameter (default 2000 ms; 0 disables the filter). Same
    idempotency, lockdown, and sig_enforce handling as step 8.
 
 After a reboot, sanity checks:
@@ -279,7 +279,7 @@ journalctl -k -b | grep -iE 'sof.*(panic|crash|exception)'
 modinfo -F filename huawei_wmi
 #   → /lib/modules/.../updates/huawei-wmi.ko.zst
 cat /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
-#   → 1000  (write any other value to retune, 0 to disable)
+#   → 2000  (write any other value to retune, 0 to disable)
 ```
 
 ---
@@ -486,7 +486,7 @@ pattern at the driver level:
    flicker, no userspace dispatch).
 3. If no second event arrives, the deferred event is emitted
    normally (legitimate single Fn+F7 press toggles mute with at
-   most ~1 s of added latency).
+   most ~2 s of added latency).
 
 All other WMI events (volume, brightness, wlan, …) keep the upstream
 immediate-emit behaviour. The patch file is at
@@ -498,25 +498,31 @@ The storm window is exposed as a writable module parameter and can
 be adjusted without a reboot or module reload:
 
 ```bash
-# current value (1000 ms default):
+# current value (2000 ms default):
 cat /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
 
 # larger window — catches longer storm gaps but adds more Fn+F7 latency:
-echo 1500 | sudo tee /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
+echo 3000 | sudo tee /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
 
 # disable the filter entirely — restore upstream immediate-emit behaviour
 # (useful for A/B testing or if a future kernel makes the patch obsolete):
 echo 0    | sudo tee /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
 
 # also persistable via modprobe.d:
-echo 'options huawei-wmi micmute_storm_window_ms=1500' \
+echo 'options huawei-wmi micmute_storm_window_ms=3000' \
    | sudo tee /etc/modprobe.d/honor-zqcp-huawei-wmi.conf
 ```
 
-The default 1000 ms was chosen because all measured EC storm pairs
-on this unit fell within that window, and 1 s of added latency on
-the legitimate hardware shortcut is below the typical "press the
-button while talking" reaction threshold.
+The default was tuned empirically on the ZQC-P unit. An initial
+1000 ms catches the most common 2-event pair pattern (events ~0.7 s
+apart), but turned out to sit on the boundary for a 4-event storm
+at exactly 1.0 s intervals — depending on scheduler timing, some
+events would race past the cancel point and emit. 2000 ms catches
+that 4-event pattern as two consecutive pair-cancels (1+2 dropped,
+3+4 dropped) with no net toggles, at the cost of ~2 s of added
+latency on the legitimate Fn+F7 shortcut. Bump higher if you
+observe a still-wider EC storm pattern in your dmesg `0xf8` log;
+drop to 0 if you have no storm and want immediate Fn+F7 response.
 
 ### Verifying after reboot
 

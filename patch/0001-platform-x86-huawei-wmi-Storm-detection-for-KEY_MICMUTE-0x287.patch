@@ -41,11 +41,14 @@ configurable window) at the driver level:
   2. If a second 0x287 arrives during the window, drop both (storm).
   3. Otherwise emit the deferred event normally (single press).
 
-The new module parameter micmute_storm_window_ms (default 1000 ms,
-0 = disable) is writable at runtime so the trade-off (a <=1 s emit
-latency on legitimate Fn+F7) can be tuned per machine. All other WMI
-events (volume, brightness, wlan, ...) keep upstream immediate-emit
-behaviour.
+The new module parameter micmute_storm_window_ms (default 2000 ms,
+0 = disable) is writable at runtime so the trade-off (a <=2 s emit
+latency on legitimate Fn+F7) can be tuned per machine. The 2000 ms
+default was empirically tuned on the ZQC-P unit, where a 4-event
+storm at exactly 1.0 s intervals would otherwise sit on the edge of
+a tighter window and slip through depending on scheduler timing.
+All other WMI events (volume, brightness, wlan, ...) keep upstream
+immediate-emit behaviour.
 
 Tested-on: HONOR MagicBook Pro 14 AI ZQC-P / M1010 (1ee7:209d)
 Signed-off-by: HONOR ZQC-P Linux fixes <noreply@example.invalid>
@@ -77,7 +80,7 @@ diff --git a/drivers/platform/x86/huawei-wmi.c b/drivers/platform/x86/huawei-wmi
 + * the window we drop both. Set the parameter to 0 to restore the
 + * upstream immediate-emit behaviour.
 + */
-+static int micmute_storm_window_ms = 1000;
++static int micmute_storm_window_ms = 2000;
 +module_param(micmute_storm_window_ms, int, 0644);
 +MODULE_PARM_DESC(micmute_storm_window_ms,
 +		"EC privacy-storm window (ms) for KEY_MICMUTE (0x287); 0 disables.");

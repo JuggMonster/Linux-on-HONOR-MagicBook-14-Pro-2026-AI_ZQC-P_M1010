@@ -26,7 +26,7 @@
 #
 #   The patch adds storm-detection in huawei_wmi_process_key(): when
 #   a 0x287 event arrives, the driver defers emission by a configurable
-#   number of milliseconds (micmute_storm_window_ms, default 1000);
+#   number of milliseconds (micmute_storm_window_ms, default 2000);
 #   if a second 0x287 arrives during the window both are dropped
 #   (storm pair); otherwise the deferred event is emitted normally
 #   (legitimate single Fn+F7 press). Trade-off: <=1 s emit latency on
@@ -234,7 +234,7 @@ cat <<EOF
   After REBOOT the patched huawei-wmi.ko will load instead of the in-
   tree one. The driver will then debounce EC privacy-storm event pairs
   on WMI event 0x287 (KEY_MICMUTE) by deferring emission of the first
-  event by ${KO_NAME%.ko.zst}'s default 1000 ms window.
+  event by ${KO_NAME%.ko.zst}'s default 2000 ms window.
 
   Tune at runtime without reboot:
     \$ echo 1500 | sudo tee /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
