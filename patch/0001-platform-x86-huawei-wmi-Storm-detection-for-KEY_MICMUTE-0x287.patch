@@ -1,60 +1,76 @@
 From: HONOR ZQC-P Linux fixes <noreply@example.invalid>
-Date: Fri, 29 May 2026 23:50:00 +0300
+Date: Sat, 30 May 2026 01:10:00 +0300
 Subject: [PATCH] platform/x86: huawei-wmi: Storm-detection for KEY_MICMUTE
  (WMI 0x287)
 
 On some HONOR MagicBook and Huawei MateBook EC firmware revisions, the
 embedded controller autonomously fires the mic-privacy WMI event 0x287
-in 2-event pairs separated by 0.5–5 seconds ("privacy storm"), without
-any user keypress. Confirmed reproduction on HONOR MagicBook Pro 14 AI
-(ZQC-P / M1010, Intel Core Ultra X9 388H, Panther Lake) running
-linux-cachyos 7.0.10: 17 storm bursts over an 80-minute session,
-triggered by various combinations of touchpad swipes, focus changes to
-audio-playing windows, intel_lpmd platform-profile transitions, and
-even pure idle. The EC also writes the legacy PS/2 scancode 0xf8 to
-i8042 in parallel, which surfaces in dmesg as
+in burst patterns of 2-4+ events separated by 0.7-1.5 seconds ("privacy
+storm"), without any user keypress. Confirmed reproduction on HONOR
+MagicBook Pro 14 AI (ZQC-P / M1010, Intel Core Ultra X9 388H, Panther
+Lake) running linux-cachyos 7.0.10. The EC also writes the legacy PS/2
+scancode 0xf8 to i8042 in parallel, which surfaces in dmesg as
   atkbd serio0: Unknown key pressed (translated set 2, code 0xf8
   on isa0060/serio0).
 
-Each pair toggles the default source mute twice, which would normally
-self-cancel; but in practice userspace dispatch races (Wayland
-compositor + gsd-media-keys grab + audio backend) leave the state
-inconsistent, with the platform::micmute LED stuck on and the
-microphone silently muted until the user manually unmutes via the
-tray icon or pavucontrol. The user-visible symptom is "mic mutes
-itself spontaneously and the Fn+F7 hardware shortcut no longer
+Each burst's KEY_MICMUTE events toggle the default source mute, which
+would normally self-cancel for an even-count burst; but in practice
+userspace dispatch races (Wayland compositor + gsd-media-keys grab +
+audio backend) lose some of the toggles, leaving the mic stuck muted
+with the platform::micmute LED on. The user-visible symptom is "mic
+mutes itself spontaneously and the Fn+F7 hardware shortcut no longer
 restores it."
 
 The root cause is in the EC firmware and the trigger is not exposed
 via any documented ACPI/WMI dispatch method (the full WMAA dispatcher
-in SSDT21 was audited — only the OS->EC setter SMLS touches the mic
+in SSDT21 was audited -- only the OS->EC setter SMLS touches the mic
 state, and no "disable privacy timer" setter exists). HONOR's own
-Windows PCManager binaries do not call any such setter either —
+Windows PCManager binaries do not call any such setter either --
 Windows is simply fast enough that the 2-event self-cancel returns
 mute to the original state without a visible LED flicker.
 
-Detect the storm by distinguishing a legitimate single Fn+F7 press
-(one event) from a spurious EC storm pair (two events within a
-configurable window) at the driver level:
+Detect the storm with an "emit-first, then compensate-if-burst"
+algorithm at the driver level:
 
-  1. On the first 0x287, defer emission by micmute_storm_window_ms.
-  2. If a second 0x287 arrives during the window, drop both (storm).
-  3. Otherwise emit the deferred event normally (single press).
+  1. On the first 0x287 in a quiet window, emit KEY_MICMUTE
+     immediately (no added latency on legitimate Fn+F7).
+  2. Start a watch timer for micmute_storm_window_ms.
+  3. If additional 0x287 events arrive during the window, increment
+     a counter and re-arm the timer to the new arrival time (so the
+     window extends to cover the whole burst). The additional events
+     are NOT emitted.
+  4. When the window expires:
+     - count == 1 (single press): no further action; net result is
+       one mute toggle.
+     - count >= 2 (burst of any kind, storm OR rapid intentional
+       press): emit ONE compensating KEY_MICMUTE, canceling out the
+       initial immediate emission. Net result for the burst is zero
+       mute toggles -- the source mute state is preserved.
+
+This trades a brief LED flicker during a storm (initial emit, then
+compensation ~window_ms later) for full preservation of the mute
+state across any same-window burst, while keeping immediate response
+on legitimate single Fn+F7 presses. An intentional rapid double-press
+within the window also self-cancels (LED flickers on then off) --
+acceptable, since intentional rapid double-press is unusual.
+
+For burst patterns where individual events are spread >= window_ms
+apart (an outlier observed on this unit at ~3-6 s intervals), each
+event is treated as a separate single press; the kernel cannot
+distinguish such a slow burst from human presses without misclassifying
+legitimate use, so that case is left to userspace dispatch reliability.
 
 The new module parameter micmute_storm_window_ms (default 2000 ms,
-0 = disable) is writable at runtime so the trade-off (a <=2 s emit
-latency on legitimate Fn+F7) can be tuned per machine. The 2000 ms
-default was empirically tuned on the ZQC-P unit, where a 4-event
-storm at exactly 1.0 s intervals would otherwise sit on the edge of
-a tighter window and slip through depending on scheduler timing.
-All other WMI events (volume, brightness, wlan, ...) keep upstream
-immediate-emit behaviour.
+0 = disable, restoring upstream immediate-emit behaviour) is writable
+at runtime so the trade-off can be tuned per machine. All other WMI
+events (volume, brightness, wlan, ...) keep upstream immediate-emit
+behaviour.
 
 Tested-on: HONOR MagicBook Pro 14 AI ZQC-P / M1010 (1ee7:209d)
 Signed-off-by: HONOR ZQC-P Linux fixes <noreply@example.invalid>
 ---
- drivers/platform/x86/huawei-wmi.c | 63 +++++++++++++++++++++++++++++++
- 1 file changed, 63 insertions(+)
+ drivers/platform/x86/huawei-wmi.c | 78 +++++++++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
 
 diff --git a/drivers/platform/x86/huawei-wmi.c b/drivers/platform/x86/huawei-wmi.c
 --- a/drivers/platform/x86/huawei-wmi.c
@@ -66,87 +82,102 @@ diff --git a/drivers/platform/x86/huawei-wmi.c b/drivers/platform/x86/huawei-wmi
 +#include <linux/workqueue.h>
  #include <linux/wmi.h>
  #include <acpi/battery.h>
- 
-@@ -104,6 +105,64 @@
+
+@@ -104,6 +105,79 @@
  MODULE_PARM_DESC(report_brightness,
  		"Report brightness keys.");
- 
+
 +/*
-+ * KEY_MICMUTE storm detection — see commit message for full background.
++ * KEY_MICMUTE storm detection -- see commit message for full background.
 + *
 + * Some HONOR / Huawei EC firmwares emit the mic-privacy WMI event
-+ * 0x287 in autonomous 2-event pairs ("privacy storm"). We defer the
-+ * first 0x287 by micmute_storm_window_ms; if a second arrives during
-+ * the window we drop both. Set the parameter to 0 to restore the
-+ * upstream immediate-emit behaviour.
++ * 0x287 in autonomous bursts ("privacy storm"). We emit the first
++ * 0x287 in a quiet window immediately (no added latency on a
++ * legitimate Fn+F7 press), then watch for further 0x287 events for
++ * micmute_storm_window_ms milliseconds. If 2 or more events arrived
++ * within the window (i.e. a burst), we emit one compensating
++ * KEY_MICMUTE at the end of the window to cancel out the initial
++ * emission -- the source mute state is preserved across the burst.
++ *
++ * Set the parameter to 0 to restore the upstream immediate-emit
++ * behaviour without storm detection.
 + */
 +static int micmute_storm_window_ms = 2000;
 +module_param(micmute_storm_window_ms, int, 0644);
 +MODULE_PARM_DESC(micmute_storm_window_ms,
 +		"EC privacy-storm window (ms) for KEY_MICMUTE (0x287); 0 disables.");
 +
-+static atomic_t huawei_wmi_micmute_pending = ATOMIC_INIT(0);
++static atomic_t huawei_wmi_micmute_count = ATOMIC_INIT(0);
 +static struct input_dev *huawei_wmi_micmute_idev;
 +static const struct key_entry *huawei_wmi_micmute_key;
 +
-+static void huawei_wmi_micmute_emit_deferred(struct work_struct *work);
++static void huawei_wmi_micmute_compensate(struct work_struct *work);
 +static DECLARE_DELAYED_WORK(huawei_wmi_micmute_work,
-+			    huawei_wmi_micmute_emit_deferred);
++			    huawei_wmi_micmute_compensate);
 +
-+static void huawei_wmi_micmute_emit_deferred(struct work_struct *work)
++static void huawei_wmi_micmute_compensate(struct work_struct *work)
 +{
-+	if (atomic_xchg(&huawei_wmi_micmute_pending, 0) &&
-+	    huawei_wmi_micmute_idev && huawei_wmi_micmute_key)
++	int count = atomic_xchg(&huawei_wmi_micmute_count, 0);
++
++	/*
++	 * count == 1: single press, only the immediate emission happened;
++	 *             no compensation needed, net result is one toggle.
++	 * count >= 2: burst -- emit one compensating KEY_MICMUTE so the
++	 *             initial immediate emission is cancelled out and the
++	 *             net source mute state from the burst is zero.
++	 */
++	if (count >= 2 && huawei_wmi_micmute_idev && huawei_wmi_micmute_key)
 +		sparse_keymap_report_entry(huawei_wmi_micmute_idev,
 +					   huawei_wmi_micmute_key, 1, true);
 +}
 +
-+/* Returns true when the event was consumed by storm-detection. */
++/*
++ * Returns true when the event should NOT be emitted by the caller
++ * (a subsequent event in an active burst window). Returns false to
++ * let the caller emit normally (first event of a fresh window).
++ */
 +static bool huawei_wmi_micmute_filter(struct input_dev *idev,
 +				      const struct key_entry *key)
 +{
 +	int window_ms = READ_ONCE(micmute_storm_window_ms);
++	int count;
 +
 +	if (window_ms <= 0)
 +		return false;
 +
-+	if (atomic_xchg(&huawei_wmi_micmute_pending, 1)) {
-+		/*
-+		 * Second event arrived within the window — storm pair,
-+		 * drop both. cancel_delayed_work() is safe to call from
-+		 * the WMI notify context (it does not wait).
-+		 */
-+		cancel_delayed_work(&huawei_wmi_micmute_work);
-+		atomic_set(&huawei_wmi_micmute_pending, 0);
-+		return true;
-+	}
-+
-+	/* First event — defer to see if a storm sibling arrives. */
 +	huawei_wmi_micmute_idev = idev;
 +	huawei_wmi_micmute_key = key;
-+	schedule_delayed_work(&huawei_wmi_micmute_work,
-+			      msecs_to_jiffies(window_ms));
-+	return true;
++
++	count = atomic_inc_return(&huawei_wmi_micmute_count);
++
++	/* Re-arm (or initially arm) the watch timer. mod_delayed_work is
++	 * atomic-safe: cancels any pending timer and schedules a fresh
++	 * one window_ms from now, extending the window for every event. */
++	mod_delayed_work(system_wq, &huawei_wmi_micmute_work,
++			 msecs_to_jiffies(window_ms));
++
++	/* First event of a window: caller emits immediately. */
++	return count > 1;
 +}
 +
  /* Quirks */
- 
+
  static int __init dmi_matched(const struct dmi_system_id *dmi)
-@@ -735,6 +794,9 @@
+@@ -735,6 +809,9 @@
  			key->sw.code == KEY_BRIGHTNESSUP))
  		return;
- 
+
 +	if (code == 0x287 && huawei_wmi_micmute_filter(idev, key))
 +		return;
 +
  	sparse_keymap_report_entry(idev, key, 1, true);
  }
- 
-@@ -780,6 +842,7 @@
- 
+
+@@ -780,6 +857,7 @@
+
  static void huawei_wmi_input_exit(struct device *dev, const char *guid)
  {
 +	cancel_delayed_work_sync(&huawei_wmi_micmute_work);
  	wmi_remove_notify_handler(guid);
  }
- 
+
