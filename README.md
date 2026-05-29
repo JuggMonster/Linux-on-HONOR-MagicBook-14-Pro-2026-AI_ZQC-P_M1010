@@ -124,6 +124,57 @@ ships a rebuild of `snd-hda-codec-alc269.ko` that adds the missing
 quirk; see [3.5mm-jack headset microphone](#35mm-jack-headset-microphone)
 for what was wrong and what was verified.
 
+And a fourth problem, reported against other Intel Panther Lake
+laptops: the **SOF DSP firmware can panic on suspend/resume** under
+specific PipeWire / pavucontrol stream-rotation patterns. The IPC4
+copier widget's `ipc_config_data` buffer is built once at first
+`ipc_prepare` and cached; on resume the host and link DMA channels
+are re-allocated with new stream tags, but the widget list persists
+across suspend so the cached payload with stale boot-time DMA IDs
+is sent to the firmware → ChainDMA collision → DSP panic (`DSP
+panic!` + `Core dump is not available due to invalid separator
+0xc0de` in `dmesg`). Once the DSP panics, PipeWire's stream
+associations are stale and every Fn+F7 press silently fails to
+toggle the source mute (the LED stays frozen and audio is dead
+until the DSP is reloaded). `apply_patch.sh` ships a rebuild of
+`snd-sof.ko` that backports [thesofproject/linux PR #5762] by Peter
+Ujfalusi (`sound/soc/sof/ipc4-topology.c`, +33 lines, refreshes the
+cached payload right before IPC send); see [SOF DSP suspend/resume
+crash](#sof-dsp-suspendresume-crash) for the trigger conditions,
+the upstream tracking issue, and how to verify the fix.
+
+This patch is shipped as a **preventive backport**: the upstream
+race is real and the kernel fix is correct, but on this particular
+HONOR ZQC-P unit a `rtcwake -m mem -s 8` × 3 cycles repro with
+pavucontrol open produced **zero** `DSP panic!` entries in `dmesg`
+both before and after the backport, and there are no `DSP panic!`
+entries across any of the six boots in the local journal either.
+So we cannot claim on this hardware that the patch fixes a
+reproducible symptom — only that it closes the upstream race
+should some application workflow ever trigger it here.
+
+[thesofproject/linux PR #5762]: https://github.com/thesofproject/linux/pull/5762
+
+A fifth, distinct problem turned out to be the **actual** cause of
+the user-visible "mic mutes itself and Fn+F7 won't restore it"
+symptom that the SOF backport was originally chasing: the HONOR EC
+firmware autonomously fires the mic-privacy WMI event 0x287 in
+2-event pairs without any user keypress, triggered by combinations
+of touchpad swipes, focus changes to audio-playing windows,
+`intel_lpmd` platform-profile transitions, and pure idle. The
+trigger is opaque EC firmware logic — the full WMAA dispatcher in
+`SSDT21` was audited and no "disable privacy timer" setter exists.
+HONOR's own Windows PCManager binaries do not call any such setter
+either; Windows just handles the storm pairs fast enough that the
+two source-mute toggles self-cancel without a visible LED flicker,
+whereas on Linux Wayland the userspace dispatch races leave the
+mic stuck muted. `apply_patch.sh` ships a small (+63-line)
+huawei-wmi.c patch (step [8/8]) that detects the storm pair pattern
+at the kernel-driver level and drops both events; see
+[EC mic-privacy storm](#ec-mic-privacy-storm-on-wmi-0x287) for the
+full AML chain, the runtime-tunable `micmute_storm_window_ms`
+module parameter, and verification commands.
+
 ---
 
 ## Quick install
@@ -159,6 +210,30 @@ under `/root/honor-zqcp-fix-backup-*` on each apply).
    `/lib/modules/$(uname -r)/kernel/sound/hda/codecs/realtek/snd-hda-codec-alc269.ko.zst`
    (the original is saved as `/root/snd-hda-codec-alc269.ko.zst.orig`).
    This step is idempotent and re-runs cleanly after every kernel update.
+8. Runs `patch/install-sof-ipc4-fix.sh` which fetches the running
+   kernel's `sound/soc/sof/` tree from the upstream stable tree,
+   applies `patch/0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch`
+   ([thesofproject/linux PR #5762]), builds `snd-sof.ko` out-of-tree
+   against the installed kernel headers, and drops the rebuild into
+   `/lib/modules/$(uname -r)/updates/snd-sof.ko.zst` as an overlay
+   (the in-tree module is left untouched and the original is also
+   saved as `/root/snd-sof.ko.zst.orig`). This step is idempotent:
+   if upstream has already merged the patch it removes the now-
+   redundant overlay; if the overlay is already in place it is a
+   no-op. It is skipped with a warning if kernel lockdown or
+   `module.sig_enforce=1` would block the unsigned overlay.
+9. Runs `patch/install-huawei-wmi-fix.sh` which fetches the running
+   kernel's `drivers/platform/x86/huawei-wmi.c` from the upstream
+   stable tree, applies
+   `patch/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch`
+   (a local +63-line storm-detection patch), builds `huawei-wmi.ko`
+   out-of-tree against the installed kernel headers, and drops the
+   rebuild into `/lib/modules/$(uname -r)/updates/huawei-wmi.ko.zst`
+   as an overlay (the in-tree module is left untouched and the
+   original is saved as `/root/huawei-wmi.ko.zst.orig`). The new
+   module exposes a runtime-tunable `micmute_storm_window_ms`
+   parameter (default 1000 ms; 0 disables the filter). Same
+   idempotency, lockdown, and sig_enforce handling as step 8.
 
 After a reboot, sanity checks:
 
@@ -187,38 +262,89 @@ sudo dmesg | grep 'picked fixup.*1ee7:209d'
 pactl list short sources | grep -iv monitor
 #   → ...HiFi__Mic1__source    (built-in DMIC array)
 #   → ...HiFi__Mic2__source    (analog headset mic — the new one)
+
+# SOF IPC4 fix is active — modinfo resolves to the updates/ overlay,
+# not the in-tree module:
+modinfo -F filename snd_sof
+#   → /lib/modules/.../updates/snd-sof.ko.zst
+
+# After a suspend/resume cycle with pavucontrol open, no DSP panic in
+# the kernel log (direct repro from upstream thesofproject/sof#10700):
+sudo rtcwake -m mem -s 5     # repeat 2-3 times
+journalctl -k -b | grep -iE 'sof.*(panic|crash|exception)'
+#   → empty
+
+# huawei-wmi storm-detection is active — overlay loaded and the new
+# tunable parameter is exposed:
+modinfo -F filename huawei_wmi
+#   → /lib/modules/.../updates/huawei-wmi.ko.zst
+cat /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
+#   → 1000  (write any other value to retune, 0 to disable)
 ```
 
 ---
 
 ## Fn+F7 mic-mute key
 
-**Works on stock mainline Linux**, no patch needed. The `huawei-wmi`
-driver registers a separate input device called *"Huawei WMI hotkeys"*
-which emits `KEY_MICMUTE` (= `XF86AudioMicMute`) on every press; the
-desktop's audio shortcut binding toggles the PipeWire default source
-mute; the F7 LED follows via the `audio-micmute` LED trigger that
-`huawei-wmi` registers on `/sys/class/leds/platform::micmute`.
+The key chain itself **works on stock mainline Linux** with no
+keymap, hwdb, or systemd plumbing. The `huawei-wmi` driver registers
+a separate input device called *"Huawei WMI hotkeys"* which emits
+`KEY_MICMUTE` (= `XF86AudioMicMute`) on every press; the desktop's
+audio shortcut binding toggles the PipeWire default source mute; the
+F7 LED follows via the `audio-micmute` LED trigger that `huawei-wmi`
+registers on `/sys/class/leds/platform::micmute`.
+
+What is NOT stable on stock mainline is the **HONOR EC firmware**
+itself: it autonomously fires the mic-privacy WMI event (0x287,
+`KEY_MICMUTE`) in 2-event pairs without any user keypress —
+triggered by touchpad swipes that change focus to an audio-playing
+window, by `intel_lpmd` platform-profile transitions, and even
+during pure idle. Each pair would normally self-cancel (two
+toggles return to the original state), but userspace dispatch
+races (Wayland compositor + `gsd-media-keys` grab + audio
+backend) lose one of the two toggles and leave the mic stuck
+muted, with the platform::micmute LED on and Fn+F7 unable to
+restore it. Step [8/8] in `apply_patch.sh` installs a kernel
+patch that detects the storm pair pattern and drops both events;
+see [EC mic-privacy storm](#ec-mic-privacy-storm-on-wmi-0x287)
+for the full root-cause chain and the tunable parameter.
+
+A separate but unrelated issue used to also break this chain: the
+SOF DSP firmware on Panther Lake can panic on suspend/resume under
+specific PipeWire / pavucontrol stream-rotation patterns, after
+which every Fn+F7 press silently fails. Step [7/8] backports the
+upstream kernel fix; see
+[SOF DSP suspend/resume crash](#sof-dsp-suspendresume-crash). On
+this particular HONOR ZQC-P unit the upstream SOF race is not
+reproducible (zero `DSP panic!` in journal across all logged
+boots), so the SOF backport ships as a defensive preventive only.
 
 Verified on `linux-cachyos 7.0.10-1` with `sof-audio-pci-intel-ptl`,
-PipeWire 1.6.6, GNOME 49 Wayland and niri.
+PipeWire 1.6.6, GNOME 50 Wayland and niri.
 
 **Two gotchas, each with a definite cause:**
 
 1. **`dmesg` prints `atkbd serio0: Unknown key pressed (translated set 2,
    code 0xf8 on isa0060/serio0)` on every Fn+F7 press.** The BIOS
-   echoes the key both on the WMI hot-key bus *and* on legacy i8042 as
-   PS/2 scancode `0xE078`. `atkbd` has no mapping for it. This is
+   echoes the key both on the WMI hot-key bus *and* on legacy i8042
+   as PS/2 scancode `0xE078`. `atkbd` has no mapping for it. This is
    cosmetic — nothing in the audio stack reads from `atkbd` for
-   `KEY_MICMUTE`. Do not add an `hwdb` / `setkeycodes` entry to silence
-   it: that creates a second `KEY_MICMUTE` source, the desktop toggles
-   the mute twice per press, and Fn+F7 appears broken. The legacy
-   `setkeycodes` path is the only one that actually takes effect for
-   extended scancodes on current `atkbd` — a pure `hwdb` rule is
-   rejected with `-EINVAL` — but neither should be applied here.
-   Earlier revisions of this patch shipped exactly that mistake; if
-   you have leftover files from them, see
+   `KEY_MICMUTE`. Do not add an `hwdb` / `setkeycodes` entry to
+   silence it: that creates a second `KEY_MICMUTE` source, the
+   desktop toggles the mute twice per press, and Fn+F7 appears
+   broken. The legacy `setkeycodes` path is the only one that
+   actually takes effect for extended scancodes on current `atkbd` —
+   a pure `hwdb` rule is rejected with `-EINVAL` — but neither
+   should be applied here. Earlier revisions of this patch shipped
+   exactly that mistake; if you have leftover files from them, see
    [Removing an old Fn+F7 keymap fix](#removing-an-old-fnf7-keymap-fix).
+
+   The same `0xf8` line is **also** the forensic marker for the EC
+   privacy storm: a legitimate human Fn+F7 press produces ONE
+   `code 0xf8` pair (press + release) in the kernel log, whereas
+   the EC storm produces TWO pairs within ~1 second. Counting these
+   in dmesg (`grep -c 'code 0xf8 on isa0060'`) is how we measured
+   the burst rate during the investigation.
 
 2. **The LED follows only the built-in DMIC array's mute, not the
    analog headset mic's mute.** On this hardware the audio chain is
@@ -231,11 +357,11 @@ PipeWire 1.6.6, GNOME 49 Wayland and niri.
    layer — a proper fix needs either modifying
    `sound/hda/codecs/realtek/realtek.c` (broader change with
    ALSA-maintainer review) or adding the equivalent hook on the SOF
-   skl_hda_dsp_generic side. Practical workaround until then: keep the
-   DMIC as the system default and only switch to the headset mic from
-   inside the specific app that needs it (Telegram per-call selector
-   etc.). Fn+F7 then keeps toggling the DMIC and the LED stays
-   correct, while the app captures from the headset.
+   skl_hda_dsp_generic side. Practical workaround until then: keep
+   the DMIC as the system default and only switch to the headset mic
+   from inside the specific app that needs it (Telegram per-call
+   selector etc.). Fn+F7 then keeps toggling the DMIC and the LED
+   stays correct, while the app captures from the headset.
 
 ### Removing an old Fn+F7 keymap fix
 
@@ -264,6 +390,327 @@ echo audio-micmute | sudo tee /sys/class/leds/platform::micmute/trigger
 
 A reboot also restores the trigger because `huawei-wmi` re-applies it
 on probe.
+
+---
+
+## EC mic-privacy storm on WMI 0x287
+
+The HONOR EC firmware on this laptop autonomously fires the
+mic-privacy WMI event 0x287 (`KEY_MICMUTE`) in 2-event pairs without
+any user keypress. The "privacy storm" is triggered by various
+combinations of:
+
+- touchpad swipe gestures (multi-finger workspace/overview swipes)
+  that change focus to a window doing audio playback
+- `intel_lpmd` platform-profile transitions (`active` ↔ `low-power`)
+- and even pure system idle — bursts fire on no observable input
+
+Measured rate on this unit: **17 bursts in an 80-minute session**;
+each burst is exactly two `KEY_MICMUTE` press+release pairs within
+~0.5–5 seconds of each other. Each pair would normally self-cancel
+(two source-mute toggles return to the original state), but in
+practice userspace dispatch races leave the source stuck muted, the
+platform::micmute LED on, and the hardware Fn+F7 shortcut unable to
+restore it. The user-visible symptom is *"the mic muted itself
+without me touching anything, and Fn+F7 no longer un-mutes."*
+
+### Root cause (research notes)
+
+The exact ACPI / WMI path is identical for both a legitimate human
+Fn+F7 press and a spurious EC storm event — there is no in-AML
+signal that distinguishes them:
+
+```
+AML handler in DSDT.dsl:
+
+  Method (_Q14, 0, NotSerialized) {   // EC SCI Query, code 0x14
+      \_SB.WMI1.WMEN = 0x0287          // <-- KEY_MICMUTE
+      Notify (\_SB.WMI1, 0xA0)
+  }
+
+Full chain:
+
+  1. Touchpad swipe gesture + focus change to audio-playing window
+                  ↓
+  2. HONOR EC firmware (internal privacy logic, NOT modifiable)
+                  ↓
+  3. EC raises SCI with query code 0x14
+                  ↓
+  4. AML executes _Q14 (visible in DSDT.dsl line ~25072):
+         WMI1.WMEN = 0x0287
+         Notify (WMI1, 0xA0)
+                  ↓
+  5. huawei-wmi driver receives the WMI event
+                  ↓
+  6. huawei-wmi keymap: { KE_KEY, 0x287, { KEY_MICMUTE } } → emit
+     KEY_MICMUTE on the "Huawei WMI hotkeys" input device
+                  ↓
+  7. gsd-media-keys toggles the source mute → the audio-micmute
+     LED trigger follows
+
+Parallel side-effect: the EC also emits the legacy PS/2 scancode
+0xf8 on i8042, for which atkbd has no keymap → produces "Unknown
+key code 0xf8" in dmesg as the cleanest forensic marker of when
+the storm fires.
+
+Burst signature (easy to tell from a human press):
+
+  22:31:18 press  →  22:31:18 release  →  pause ~700 ms
+  22:31:19 press  →  22:31:19 release      <-- second pair = storm marker
+
+Real Fn+F7 press = ONE press+release pair.
+EC storm        = TWO press+release pairs within 1–1.5 seconds.
+```
+
+OEM-level disablement was **investigated and ruled out**: the full
+WMAA dispatcher in `SSDT21` (~100 setter/getter methods) was
+audited and the only mic-related method is `SMLS` (an OS→EC writer
+that sets the current mute state via the `MCON` EC RAM bit); no
+"disable privacy timer" setter exists. HONOR's own Windows
+PCManager binaries do not call any such setter either — Windows
+simply handles the storm fast enough that the 2-event self-cancel
+returns mute to the original state without a visible LED flicker.
+
+### The fix
+
+`apply_patch.sh` step [8/8] (= `patch/install-huawei-wmi-fix.sh`)
+backports a small (+63-line) patch to
+`drivers/platform/x86/huawei-wmi.c` that detects the storm pair
+pattern at the driver level:
+
+1. On the first WMI 0x287 the driver defers emission by
+   `micmute_storm_window_ms` milliseconds via a `delayed_work`,
+   instead of forwarding the `KEY_MICMUTE` immediately.
+2. If a second WMI 0x287 arrives during the window, both are
+   dropped (the storm pair is silenced — no mute toggle, no LED
+   flicker, no userspace dispatch).
+3. If no second event arrives, the deferred event is emitted
+   normally (legitimate single Fn+F7 press toggles mute with at
+   most ~1 s of added latency).
+
+All other WMI events (volume, brightness, wlan, …) keep the upstream
+immediate-emit behaviour. The patch file is at
+`patch/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch`.
+
+### Runtime tuning
+
+The storm window is exposed as a writable module parameter and can
+be adjusted without a reboot or module reload:
+
+```bash
+# current value (1000 ms default):
+cat /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
+
+# larger window — catches longer storm gaps but adds more Fn+F7 latency:
+echo 1500 | sudo tee /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
+
+# disable the filter entirely — restore upstream immediate-emit behaviour
+# (useful for A/B testing or if a future kernel makes the patch obsolete):
+echo 0    | sudo tee /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
+
+# also persistable via modprobe.d:
+echo 'options huawei-wmi micmute_storm_window_ms=1500' \
+   | sudo tee /etc/modprobe.d/honor-zqcp-huawei-wmi.conf
+```
+
+The default 1000 ms was chosen because all measured EC storm pairs
+on this unit fell within that window, and 1 s of added latency on
+the legitimate hardware shortcut is below the typical "press the
+button while talking" reaction threshold.
+
+### Verifying after reboot
+
+```bash
+# Overlay is picked up by modinfo:
+modinfo -F filename huawei_wmi
+#   → /lib/modules/.../updates/huawei-wmi.ko.zst
+
+# New parameter is exported:
+modinfo -F parm huawei_wmi | grep micmute_storm_window_ms
+#   → micmute_storm_window_ms: EC privacy-storm window (ms) ... (int)
+
+# Storm events stay visible in dmesg as the 0xf8 marker, but the
+# source mute state and the LED should no longer flap:
+sudo dmesg --since '1 hour ago' | grep -c 'code 0xf8 on isa0060'
+#   ≥ 0 — count is *expected* to grow; the patch silences the
+#   downstream KEY_MICMUTE delivery, not the EC trigger itself
+
+pactl get-source-mute @DEFAULT_SOURCE@
+cat /sys/class/leds/platform::micmute/brightness
+#   should stay "Mute: no" / 0 across storms when the mic is meant
+#   to be active
+```
+
+### Rolling back
+
+```bash
+sudo rm /lib/modules/$(uname -r)/updates/huawei-wmi.ko.zst
+sudo depmod -a
+sudo reboot
+```
+
+The in-tree (unpatched) module is restored as the resolved
+candidate. The original is also kept at
+`/root/huawei-wmi.ko.zst.orig` for byte-for-byte restore if desired.
+After rolling back the storm will resume — there is no upstream
+firmware fix from HONOR at the time of writing and the EC trigger
+is not exposed via any documented ACPI/WMI ABI.
+
+---
+
+## SOF DSP suspend/resume crash
+
+On Intel Panther Lake, the SOF DSP firmware is reported to panic on
+a suspend/resume cycle under specific PipeWire / pavucontrol stream-
+rotation patterns. The panic shows up in `dmesg` as `DSP panic!`
+followed by `Core dump is not available due to invalid separator
+0xc0de` and a series of `ipc4_tx_msg_unlocked: ... failed: -19`
+lines. After such a panic, Fn+F7 still emits `KEY_MICMUTE` (the
+input chain is fine) but PipeWire cannot route the toggle through
+the dead DSP — the source stays silently un-toggled and the F7 LED
+stays in whichever state it was in. Cold-booting the DSP via the
+kernel's auto-recovery path (every ~5 s) returns it to
+`NOT_STARTED(0)`, where it boots again and may re-panic on the next
+stream open.
+
+**Reproducibility note for this specific hardware.** The honor-fnf7-
+watch logger writes a `[SOF] fw_state CHANGED` line for *every*
+state transition it polls from `/sys/kernel/debug/sof/fw_state`, and
+in practice many of those transitions are part of the runtime PM
+D3 cycle (kernel temporarily flips state to `CRASHED(7)` when an
+IPC is dropped during D3 entry, then `auto-recovers` to
+`NOT_STARTED(0)`). They are **not the same** as the
+firmware-reported `DSP panic!` from upstream
+[thesofproject/sof#10700]: that one is an actual exception inside
+the DSP that gets dumped to `dmesg`. On this HONOR ZQC-P unit, six
+boots of journal history contain **zero** `DSP panic!` entries, and
+a `pavucontrol`-plus-`rtcwake -m mem -s 8` × 3 repro produces zero
+panics both with and without the kernel patch installed. Treat the
+fix below as a **preventive backport** of a real upstream race,
+not as a known-reproducible cure for a symptom on this exact
+laptop.
+
+### Root cause
+
+The `ipc_config_data` buffer for IPC4 copier widgets is built once
+during `ipc_prepare` (called from `sof_pcm_setup_connected_widgets`)
+and cached for reuse. For host copiers the buffer contains
+`copier_data` with `gtw_cfg.node_id` (host DMA ID); for DAI copiers
+it additionally includes a `dma_config_tlv` trailer with
+`stream_id` and `dma_channel_id` for HDA link DMA.
+
+On suspend/resume both host and link DMA streams are released and
+re-allocated with potentially different stream tags. The underlying
+`copier_data` and `dma_config_tlv` structures *are* updated by
+`host_config` and `sdw_hda_dai_hw_params`, but because the widget
+list (`spcm->stream[].list`) persists across suspend,
+`sof_pcm_hw_params` skips `sof_pcm_setup_connected_widgets` and
+`ipc_prepare` never runs again to rebuild `ipc_config_data`. The
+stale cached payload with the boot-time DMA channel assignments
+is then sent to firmware → DMA channel conflict → DSP panic.
+
+Upstream tracking: [thesofproject/sof#10700] (Dell XPS 14 DA14260,
+Panther Lake — same crash signature).
+
+### The fix
+
+[thesofproject/linux PR #5762] by Peter Ujfalusi (`@ujfalusi`, SOF
+maintainer at Intel/Linaro) adds 33 lines to
+`sound/soc/sof/ipc4-topology.c`'s `sof_ipc4_widget_setup()`. Inside
+the `aif_in/aif_out/buffer` (host copier) and `dai_in/dai_out` (DAI
+copier) cases the patch refreshes the `copier_data` and (for DAI
+copiers) `dma_config_tlv` portions of the cached `ipc_config_data`
+right before the IPC message is sent. After the fix the payload
+always reflects the current DMA state regardless of whether
+`ipc_prepare` ran on this cycle.
+
+`apply_patch.sh` step [7/7] (= `patch/install-sof-ipc4-fix.sh`) does
+the backport against the running kernel:
+
+1. Refuses to run if `/sys/kernel/security/lockdown` is anything but
+   `[none]` or if `module.sig_enforce=1` is in `/proc/cmdline` —
+   unsigned modules wouldn't load.
+2. Fetches `sound/soc/sof/ipc4-topology.c` at the running kernel's
+   tag from the [gregkh stable-tree mirror][stable-tree] and greps
+   for the patch's distinctive comment text. If present, upstream
+   has already merged the fix into this kernel: the script removes
+   any prior overlay it had installed, `depmod -a`, and exits.
+3. Otherwise fetches the rest of `sound/soc/sof/*.{c,h,Makefile}`
+   plus a handful of cross-tree headers from `sound/soc/intel/common/`
+   that `sof-acpi-dev.c` `#includes`. Subdirectory descents (intel/,
+   amd/, imx/, mediatek/, xtensa/) are stripped from the Makefile so
+   the build does not cascade into platform-specific modules.
+4. Applies the patch with `patch -p3` and stages the patched tree
+   into `/lib/modules/$(uname -r)/build/sound/soc/sof/` (the kernel
+   headers package only ships `Kconfig` + per-platform subdirs there
+   on Arch / CachyOS).
+5. Builds `snd-sof.ko` out-of-tree with `LLVM=1 LLVM_IAS=1` (the
+   matching toolchain CachyOS uses) and `M=sound/soc/sof modules`.
+6. Sanity-checks that the rebuilt module's `srcversion` differs from
+   the in-tree one — if not, the patch did not actually change the
+   compiled output and the script bails out.
+7. zstd-compresses and installs the rebuild to
+   `/lib/modules/$(uname -r)/updates/snd-sof.ko.zst` (the `updates/`
+   overlay takes precedence over `kernel/sound/soc/sof/` after
+   `depmod -a`). The original is also saved to
+   `/root/snd-sof.ko.zst.orig` (one-time backup).
+
+The overlay is ~1.9 MB vs the in-tree 197 KB. The size difference
+is **not** a bug: CachyOS rebuilds kernel modules with LTO + AutoFDO
++ Propeller (the "Cachy Sauce") which compresses much better; our
+out-of-tree build uses the same `LLVM=1` toolchain but without those
+cross-module optimisations. Functionally the two modules are
+identical; the perf hit (if any) on the audio I/O path is not
+measurable.
+
+### Verifying after reboot
+
+```bash
+# Overlay is picked up by modinfo:
+modinfo -F filename snd_sof
+#   → /lib/modules/.../updates/snd-sof.ko.zst
+
+# srcversion differs from the in-tree module:
+modinfo -F srcversion snd_sof
+diff <(modinfo -F srcversion /lib/modules/$(uname -r)/updates/snd-sof.ko.zst) \
+     <(modinfo -F srcversion /lib/modules/$(uname -r)/kernel/sound/soc/sof/snd-sof.ko.zst)
+#   → the two srcversions must differ
+
+# Direct repro from upstream issue #10700 — should produce NO DSP
+# panic after the patch is loaded:
+pavucontrol &                # leave it open
+sudo rtcwake -m mem -s 5     # repeat 2-3 times
+journalctl -k -b | grep -iE 'sof.*(panic|crash|exception|fw_state)'
+#   → no `DSP panic`, no `fw_state: SOF_FW_CRASHED`
+```
+
+**Do not** use `grep -c 'CRASHED' /var/log/honor-fnf7-watch.log` as
+the validation metric. That counter conflates real firmware panics
+with benign runtime PM transitions and was the source of the
+"~30/day" baseline we initially (incorrectly) attributed to this
+patch. The reliable metric is the journal one above:
+
+```bash
+# Real firmware panics only — should stay at 0 on this hardware
+# both with and without the patch (so the patch is preventive, not
+# corrective, on this specific unit):
+journalctl -b 0 -k | grep -c 'DSP panic'
+```
+
+### Rolling back
+
+```bash
+sudo rm /lib/modules/$(uname -r)/updates/snd-sof.ko.zst
+sudo depmod -a
+sudo reboot
+```
+
+The in-tree module is restored as the resolved candidate. The
+original is also kept at `/root/snd-sof.ko.zst.orig` for byte-for-byte
+restore if desired.
+
+[thesofproject/sof#10700]: https://github.com/thesofproject/sof/issues/10700
+[stable-tree]: https://github.com/gregkh/linux
 
 ---
 
@@ -553,7 +1000,15 @@ HONOR_ZQC-P_M1010/
 ├── patch/
 │   ├── SSDT27_TPD0.aml                # ready-to-install ACPI override (binary)
 │   ├── SSDT27_TPD0.dsl                # human-readable source
-│   └── acpi_override.install          # mkinitcpio install hook (early CPIO)
+│   ├── acpi_override.install          # mkinitcpio install hook (early CPIO)
+│   ├── alc269-honor-zqc-p-m1010.patch # kernel patch: ALC256 quirk for 1ee7:209d
+│   ├── install-alc269-fix.sh          # build+install snd-hda-codec-alc269.ko
+│   ├── 0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch
+│   │                                  # kernel patch: PR #5762 backport
+│   ├── install-sof-ipc4-fix.sh        # build+install snd-sof.ko (updates/ overlay)
+│   ├── 0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch
+│   │                                  # kernel patch: EC privacy-storm filter
+│   └── install-huawei-wmi-fix.sh      # build+install huawei-wmi.ko (updates/ overlay)
 ├── build/
 │   ├── build_patch.sh              # iasl + checksum recompute + revision bump
 │   └── extract_oem_acpi.sh         # dump live ACPI tables for new investigations
@@ -641,7 +1096,8 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 
 | Component | Linux identifier / driver | Windows identifier / driver | Status |
 |---|---|---|---|
-| HD-Audio + DSP (SOF) | PCI `8086:e428`, `sof-audio-pci-intel-ptl`, card `sofhdadsp` (HDA Analog + 3× HDMI) | Realtek HD Audio + Intel SST | ✅ |
+| HD-Audio + DSP (SOF) | PCI `8086:e428`, `sof-audio-pci-intel-ptl`, card `sofhdadsp` (HDA Analog + 3× HDMI) | Realtek HD Audio + Intel SST | ✅ *needs this patch* — see [SOF DSP suspend/resume crash](#sof-dsp-suspendresume-crash) (suspend/resume reliability) |
+| Fn+F7 mic-mute key | huawei-wmi WMI event `0x287` → `KEY_MICMUTE` on the "Huawei WMI hotkeys" input device | HONOR PCManager + Windows HID built-in | ✅ *needs this patch* — see [EC mic-privacy storm](#ec-mic-privacy-storm-on-wmi-0x287) (filter spurious EC storm pairs) |
 | Speakers / headphone jack | ALSA `sof-hda-dsp Headphone` | (same as above) | ✅ |
 | Microphone array (DMIC) | SOF DMIC capture, `HiFi__Mic1__source` (4ch) | Intel Smart Sound DMIC | ✅ |
 | 3.5mm-jack headset microphone | ALC256 pin 0x19, `HiFi__Mic2__source` (2ch stereo) | Intel SST + Realtek HD Audio | ✅ *needs this patch* — see [3.5mm-jack headset microphone](#35mm-jack-headset-microphone) |

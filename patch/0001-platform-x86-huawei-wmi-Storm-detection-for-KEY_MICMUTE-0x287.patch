@@ -1,0 +1,149 @@
+From: HONOR ZQC-P Linux fixes <noreply@example.invalid>
+Date: Fri, 29 May 2026 23:50:00 +0300
+Subject: [PATCH] platform/x86: huawei-wmi: Storm-detection for KEY_MICMUTE
+ (WMI 0x287)
+
+On some HONOR MagicBook and Huawei MateBook EC firmware revisions, the
+embedded controller autonomously fires the mic-privacy WMI event 0x287
+in 2-event pairs separated by 0.5–5 seconds ("privacy storm"), without
+any user keypress. Confirmed reproduction on HONOR MagicBook Pro 14 AI
+(ZQC-P / M1010, Intel Core Ultra X9 388H, Panther Lake) running
+linux-cachyos 7.0.10: 17 storm bursts over an 80-minute session,
+triggered by various combinations of touchpad swipes, focus changes to
+audio-playing windows, intel_lpmd platform-profile transitions, and
+even pure idle. The EC also writes the legacy PS/2 scancode 0xf8 to
+i8042 in parallel, which surfaces in dmesg as
+  atkbd serio0: Unknown key pressed (translated set 2, code 0xf8
+  on isa0060/serio0).
+
+Each pair toggles the default source mute twice, which would normally
+self-cancel; but in practice userspace dispatch races (Wayland
+compositor + gsd-media-keys grab + audio backend) leave the state
+inconsistent, with the platform::micmute LED stuck on and the
+microphone silently muted until the user manually unmutes via the
+tray icon or pavucontrol. The user-visible symptom is "mic mutes
+itself spontaneously and the Fn+F7 hardware shortcut no longer
+restores it."
+
+The root cause is in the EC firmware and the trigger is not exposed
+via any documented ACPI/WMI dispatch method (the full WMAA dispatcher
+in SSDT21 was audited — only the OS->EC setter SMLS touches the mic
+state, and no "disable privacy timer" setter exists). HONOR's own
+Windows PCManager binaries do not call any such setter either —
+Windows is simply fast enough that the 2-event self-cancel returns
+mute to the original state without a visible LED flicker.
+
+Detect the storm by distinguishing a legitimate single Fn+F7 press
+(one event) from a spurious EC storm pair (two events within a
+configurable window) at the driver level:
+
+  1. On the first 0x287, defer emission by micmute_storm_window_ms.
+  2. If a second 0x287 arrives during the window, drop both (storm).
+  3. Otherwise emit the deferred event normally (single press).
+
+The new module parameter micmute_storm_window_ms (default 1000 ms,
+0 = disable) is writable at runtime so the trade-off (a <=1 s emit
+latency on legitimate Fn+F7) can be tuned per machine. All other WMI
+events (volume, brightness, wlan, ...) keep upstream immediate-emit
+behaviour.
+
+Tested-on: HONOR MagicBook Pro 14 AI ZQC-P / M1010 (1ee7:209d)
+Signed-off-by: HONOR ZQC-P Linux fixes <noreply@example.invalid>
+---
+ drivers/platform/x86/huawei-wmi.c | 63 +++++++++++++++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+
+diff --git a/drivers/platform/x86/huawei-wmi.c b/drivers/platform/x86/huawei-wmi.c
+--- a/drivers/platform/x86/huawei-wmi.c
++++ b/drivers/platform/x86/huawei-wmi.c
+@@ -17,6 +17,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/power_supply.h>
+ #include <linux/sysfs.h>
++#include <linux/workqueue.h>
+ #include <linux/wmi.h>
+ #include <acpi/battery.h>
+ 
+@@ -104,6 +105,64 @@
+ MODULE_PARM_DESC(report_brightness,
+ 		"Report brightness keys.");
+ 
++/*
++ * KEY_MICMUTE storm detection — see commit message for full background.
++ *
++ * Some HONOR / Huawei EC firmwares emit the mic-privacy WMI event
++ * 0x287 in autonomous 2-event pairs ("privacy storm"). We defer the
++ * first 0x287 by micmute_storm_window_ms; if a second arrives during
++ * the window we drop both. Set the parameter to 0 to restore the
++ * upstream immediate-emit behaviour.
++ */
++static int micmute_storm_window_ms = 1000;
++module_param(micmute_storm_window_ms, int, 0644);
++MODULE_PARM_DESC(micmute_storm_window_ms,
++		"EC privacy-storm window (ms) for KEY_MICMUTE (0x287); 0 disables.");
++
++static atomic_t huawei_wmi_micmute_pending = ATOMIC_INIT(0);
++static struct input_dev *huawei_wmi_micmute_idev;
++static const struct key_entry *huawei_wmi_micmute_key;
++
++static void huawei_wmi_micmute_emit_deferred(struct work_struct *work);
++static DECLARE_DELAYED_WORK(huawei_wmi_micmute_work,
++			    huawei_wmi_micmute_emit_deferred);
++
++static void huawei_wmi_micmute_emit_deferred(struct work_struct *work)
++{
++	if (atomic_xchg(&huawei_wmi_micmute_pending, 0) &&
++	    huawei_wmi_micmute_idev && huawei_wmi_micmute_key)
++		sparse_keymap_report_entry(huawei_wmi_micmute_idev,
++					   huawei_wmi_micmute_key, 1, true);
++}
++
++/* Returns true when the event was consumed by storm-detection. */
++static bool huawei_wmi_micmute_filter(struct input_dev *idev,
++				      const struct key_entry *key)
++{
++	int window_ms = READ_ONCE(micmute_storm_window_ms);
++
++	if (window_ms <= 0)
++		return false;
++
++	if (atomic_xchg(&huawei_wmi_micmute_pending, 1)) {
++		/*
++		 * Second event arrived within the window — storm pair,
++		 * drop both. cancel_delayed_work() is safe to call from
++		 * the WMI notify context (it does not wait).
++		 */
++		cancel_delayed_work(&huawei_wmi_micmute_work);
++		atomic_set(&huawei_wmi_micmute_pending, 0);
++		return true;
++	}
++
++	/* First event — defer to see if a storm sibling arrives. */
++	huawei_wmi_micmute_idev = idev;
++	huawei_wmi_micmute_key = key;
++	schedule_delayed_work(&huawei_wmi_micmute_work,
++			      msecs_to_jiffies(window_ms));
++	return true;
++}
++
+ /* Quirks */
+ 
+ static int __init dmi_matched(const struct dmi_system_id *dmi)
+@@ -735,6 +794,9 @@
+ 			key->sw.code == KEY_BRIGHTNESSUP))
+ 		return;
+ 
++	if (code == 0x287 && huawei_wmi_micmute_filter(idev, key))
++		return;
++
+ 	sparse_keymap_report_entry(idev, key, 1, true);
+ }
+ 
+@@ -780,6 +842,7 @@
+ 
+ static void huawei_wmi_input_exit(struct device *dev, const char *guid)
+ {
++	cancel_delayed_work_sync(&huawei_wmi_micmute_work);
+ 	wmi_remove_notify_handler(guid);
+ }
+ 

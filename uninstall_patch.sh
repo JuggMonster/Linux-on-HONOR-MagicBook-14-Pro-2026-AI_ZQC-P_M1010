@@ -9,13 +9,13 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-echo "[1/5] Remove patched SSDT"
+echo "[1/7] Remove patched SSDT"
 rm -fv /usr/lib/firmware/acpi/SSDT27_TPD0.aml
 
-echo "[2/5] Remove mkinitcpio install hook"
+echo "[2/7] Remove mkinitcpio install hook"
 rm -fv /etc/initcpio/install/acpi_override
 
-echo "[3/5] Strip acpi_override from /etc/mkinitcpio.conf and i8042.dumbkbd=1 from cmdline"
+echo "[3/7] Strip acpi_override from /etc/mkinitcpio.conf and i8042.dumbkbd=1 from cmdline"
 sed -i 's/ acpi_override//' /etc/mkinitcpio.conf
 echo "    HOOKS=$(grep -E '^HOOKS=' /etc/mkinitcpio.conf)"
 
@@ -24,16 +24,16 @@ if [[ -f /etc/default/limine ]]; then
     echo "    $(grep -E '^KERNEL_CMDLINE\[default\]' /etc/default/limine)"
 fi
 
-echo "[4/5] Restore original snd-hda-codec-alc269.ko.zst (if backup present)"
 KVER=$(uname -r)
-KO_PATH="/usr/lib/modules/${KVER}/kernel/sound/hda/codecs/realtek/snd-hda-codec-alc269.ko.zst"
-BACKUP="/root/snd-hda-codec-alc269.ko.zst.orig"
-if [[ -f "$BACKUP" ]]; then
-    cp -av "$BACKUP" "$KO_PATH"
-    rm -fv "$BACKUP"
-    depmod -a
+
+echo "[4/7] Restore original snd-hda-codec-alc269.ko.zst (if backup present)"
+ALC_PATH="/usr/lib/modules/${KVER}/kernel/sound/hda/codecs/realtek/snd-hda-codec-alc269.ko.zst"
+ALC_BACKUP="/root/snd-hda-codec-alc269.ko.zst.orig"
+if [[ -f "$ALC_BACKUP" ]]; then
+    cp -av "$ALC_BACKUP" "$ALC_PATH"
+    rm -fv "$ALC_BACKUP"
 else
-    echo "    no backup at $BACKUP — patched module (if any) left in place."
+    echo "    no backup at $ALC_BACKUP — patched module (if any) left in place."
     echo "    reinstall the linux-headers / linux package to restore the original."
 fi
 
@@ -48,7 +48,30 @@ rm -f /etc/systemd/system/honor-mic-jack-init.service \
       /usr/local/bin/honor-mic-jack-init.sh
 systemctl daemon-reload 2>/dev/null || true
 
-echo "[5/5] Rebuild initramfs + bootloader config"
+echo "[5/7] Remove SOF IPC4 fix overlay (if present)"
+SOF_OVERLAY="/usr/lib/modules/${KVER}/updates/snd-sof.ko.zst"
+SOF_BACKUP="/root/snd-sof.ko.zst.orig"
+if [[ -f "$SOF_OVERLAY" ]]; then
+    rm -fv "$SOF_OVERLAY"
+else
+    echo "    no overlay at $SOF_OVERLAY — already absent."
+fi
+[[ -f "$SOF_BACKUP" ]] && echo "    in-tree backup at $SOF_BACKUP retained for next install."
+
+echo "[6/7] Remove huawei-wmi storm-detection overlay (if present)"
+WMI_OVERLAY="/usr/lib/modules/${KVER}/updates/huawei-wmi.ko.zst"
+WMI_BACKUP="/root/huawei-wmi.ko.zst.orig"
+if [[ -f "$WMI_OVERLAY" ]]; then
+    rm -fv "$WMI_OVERLAY"
+else
+    echo "    no overlay at $WMI_OVERLAY — already absent."
+fi
+[[ -f "$WMI_BACKUP" ]] && echo "    in-tree backup at $WMI_BACKUP retained for next install."
+
+rmdir --ignore-fail-on-non-empty "/usr/lib/modules/${KVER}/updates" 2>/dev/null || true
+depmod -a "$KVER"
+
+echo "[7/7] Rebuild initramfs + bootloader config"
 if command -v limine-update >/dev/null; then
     limine-update
 else
@@ -59,3 +82,8 @@ echo
 echo "Done. Reboot to fully revert. Touchpad/touchscreen will be unavailable"
 echo "again until apply_patch.sh is re-run or a different fix is installed."
 echo "Analog 3.5mm-jack headset mic input will also disappear."
+echo "SOF DSP will fall back to the in-tree (unpatched) module — expect"
+echo "occasional DSP panics on suspend/resume per thesofproject/sof#10700."
+echo "huawei-wmi will fall back to the in-tree (unpatched) module — EC"
+echo "mic-privacy storm pairs will no longer be filtered, so the mic may"
+echo "spontaneously mute itself again."
