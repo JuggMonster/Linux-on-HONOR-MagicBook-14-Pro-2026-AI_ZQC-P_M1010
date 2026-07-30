@@ -186,6 +186,18 @@ sudo ./apply_patch.sh
 sudo reboot
 ```
 
+> Each fix also lives on its own under [`patch/`](patch/), one directory per
+> component with its own README covering what is broken, why the fix looks the
+> way it does, and the dead ends already ruled out. See
+> [`patch/README.md`](patch/README.md) for the index. The fingerprint and fan
+> fixes are independent of the ACPI override and are **not** part of
+> `apply_patch.sh` — install them directly:
+>
+> ```bash
+> sudo bash patch/fingerprint/install.sh
+> sudo bash patch/fan/install.sh
+> ```
+
 That's it. `apply_patch.sh` is idempotent — running it twice is safe; running
 `uninstall_patch.sh` reverts everything (a timestamped backup is created
 under `/root/honor-zqcp-fix-backup-*` on each apply).
@@ -195,24 +207,24 @@ under `/root/honor-zqcp-fix-backup-*` on each apply).
 1. Backs up `/etc/mkinitcpio.conf`, `/etc/default/limine`,
    `/boot/limine.conf`, `/etc/initcpio/install/`, and
    `/usr/lib/firmware/acpi/`.
-2. Installs `patch/SSDT27_TPD0.aml` → `/usr/lib/firmware/acpi/SSDT27_TPD0.aml`.
-3. Installs `patch/acpi_override.install` → `/etc/initcpio/install/acpi_override`.
+2. Installs `patch/acpi-override/SSDT27_TPD0.aml` → `/usr/lib/firmware/acpi/SSDT27_TPD0.aml`.
+3. Installs `patch/acpi-override/acpi_override.install` → `/etc/initcpio/install/acpi_override`.
 4. Adds the `acpi_override` hook right after `autodetect` in
    `/etc/mkinitcpio.conf` (only if absent).
 5. Appends `i8042.dumbkbd=1` to `KERNEL_CMDLINE[default]` in
    `/etc/default/limine` (only if absent).
 6. Rebuilds the bootloader config via `limine-update` (falls back to
    `mkinitcpio -P` if Limine isn't used).
-7. Runs `patch/install-alc269-fix.sh` which fetches the running
+7. Runs `patch/headset-mic/install.sh` which fetches the running
    kernel's `alc269.c` from the upstream stable tree, adds our
    `SND_PCI_QUIRK` entry, builds `snd-hda-codec-alc269.ko`
    out-of-tree against the installed kernel headers, and replaces
    `/lib/modules/$(uname -r)/kernel/sound/hda/codecs/realtek/snd-hda-codec-alc269.ko.zst`
    (the original is saved as `/root/snd-hda-codec-alc269.ko.zst.orig`).
    This step is idempotent and re-runs cleanly after every kernel update.
-8. Runs `patch/install-sof-ipc4-fix.sh` which fetches the running
+8. Runs `patch/sof-audio/install.sh` which fetches the running
    kernel's `sound/soc/sof/` tree from the upstream stable tree,
-   applies `patch/0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch`
+   applies `patch/sof-audio/0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch`
    ([thesofproject/linux PR #5762]), builds `snd-sof.ko` out-of-tree
    against the installed kernel headers, and drops the rebuild into
    `/lib/modules/$(uname -r)/updates/snd-sof.ko.zst` as an overlay
@@ -222,10 +234,10 @@ under `/root/honor-zqcp-fix-backup-*` on each apply).
    redundant overlay; if the overlay is already in place it is a
    no-op. It is skipped with a warning if kernel lockdown or
    `module.sig_enforce=1` would block the unsigned overlay.
-9. Runs `patch/install-huawei-wmi-fix.sh` which fetches the running
+9. Runs `patch/micmute/install.sh` which fetches the running
    kernel's `drivers/platform/x86/huawei-wmi.c` from the upstream
    stable tree, applies
-   `patch/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch`
+   `patch/micmute/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch`
    (a local +63-line storm-detection patch), builds `huawei-wmi.ko`
    out-of-tree against the installed kernel headers, and drops the
    rebuild into `/lib/modules/$(uname -r)/updates/huawei-wmi.ko.zst`
@@ -473,7 +485,7 @@ returns mute to the original state without a visible LED flicker.
 
 ### The fix
 
-`apply_patch.sh` step [8/8] (= `patch/install-huawei-wmi-fix.sh`)
+`apply_patch.sh` step [8/8] (= `patch/micmute/install.sh`)
 backports a small (+63-line) patch to
 `drivers/platform/x86/huawei-wmi.c` that detects the storm pair
 pattern at the driver level:
@@ -490,7 +502,7 @@ pattern at the driver level:
 
 All other WMI events (volume, brightness, wlan, …) keep the upstream
 immediate-emit behaviour. The patch file is at
-`patch/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch`.
+`patch/micmute/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch`.
 
 ### Runtime tuning
 
@@ -630,7 +642,7 @@ right before the IPC message is sent. After the fix the payload
 always reflects the current DMA state regardless of whether
 `ipc_prepare` ran on this cycle.
 
-`apply_patch.sh` step [7/7] (= `patch/install-sof-ipc4-fix.sh`) does
+`apply_patch.sh` step [7/7] (= `patch/sof-audio/install.sh`) does
 the backport against the running kernel:
 
 1. Refuses to run if `/sys/kernel/security/lockdown` is anything but
@@ -764,8 +776,8 @@ that:
    analog mic path through `alc_probe_headset_mode` and
    `alc_update_headset_mode`.
 
-The upstream-ready patch is `patch/alc269-honor-zqc-p-m1010.patch`.
-The runtime applier `patch/install-alc269-fix.sh` reproduces it
+The upstream-ready patch is `patch/headset-mic/alc269-honor-zqc-p-m1010.patch`.
+The runtime applier `patch/headset-mic/install.sh` reproduces it
 against the running kernel's own `alc269.c` and rebuilds the codec
 module out-of-tree against `linux-*-headers`. It is invoked from step
 6 of `apply_patch.sh` and is re-runnable after every kernel update;
@@ -960,7 +972,7 @@ two tachometers over the standard ACPI EC interface and exposes them as
 fan RPM. Install with:
 
 ```bash
-sudo bash patch/install-fan-hwmon.sh
+sudo bash patch/fan/install.sh
 sensors                     # look for "honor_zqcp-isa-0000"
 ```
 
@@ -978,7 +990,7 @@ or an ACPI method call (i.e. `acpi_call` or a custom module).
 
 ## How the patch is built
 
-`patch/SSDT27_TPD0.aml` is regenerated from `patch/SSDT27_TPD0.dsl` with:
+`patch/acpi-override/SSDT27_TPD0.aml` is regenerated from `patch/acpi-override/SSDT27_TPD0.dsl` with:
 
 ```bash
 build/build_patch.sh
@@ -1226,7 +1238,7 @@ family shares — is the entire fix. No protocol reverse-engineering, no TOD
 blob, no vendor driver.
 
 ```bash
-sudo bash patch/install-fingerprint-fix.sh
+sudo bash patch/fingerprint/install.sh
 
 # then, as your normal user:
 fprintd-enroll -f right-index-finger     # 12 touches on the power button
@@ -1236,7 +1248,7 @@ fprintd-verify
 Verified on this machine: with the patch applied the device is claimed by the
 `goodixmoc` driver, opens cleanly, reports its firmware version, and answers a
 template-list query. The patch itself is
-`patch/libfprint-goodixmoc-honor-zqc-p-6f94.patch`:
+`patch/fingerprint/libfprint-goodixmoc-honor-zqc-p-6f94.patch`:
 
 ```c
      case 0x6984:
@@ -1252,7 +1264,7 @@ at commit `c4654fd`). This is a trivially reviewable id addition and should be
 sent upstream; once it lands, drop the local patch.
 
 **Note on persistence.** On Arch/CachyOS the installer does *not* drop files
-into `/usr` — it builds a real package (`patch/fingerprint-PKGBUILD`, derived
+into `/usr` — it builds a real package (`patch/fingerprint/PKGBUILD`, derived
 from Arch's own, with the patch applied in `prepare()`) and installs it with
 `pacman -U`, bumping `pkgrel` past the repo's so it is unambiguously newer.
 This matters: a bare `ninja install` leaves unowned files in `/usr`, and the

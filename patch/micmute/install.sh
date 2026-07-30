@@ -34,7 +34,7 @@
 #   storm. Set micmute_storm_window_ms=0 to disable the filter.
 #
 # This is a workaround for as long as the upstream patch under
-# patch/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch
+# patch/micmute/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch
 # has not yet landed in the kernel being used. Once the change is in
 # the running kernel's huawei-wmi.c this script becomes a no-op (it
 # will detect the existing edit and skip the rebuild, removing any

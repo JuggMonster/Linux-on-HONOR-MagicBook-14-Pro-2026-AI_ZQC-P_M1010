@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_patch.sh — rebuild patch/SSDT27_TPD0.aml from patch/SSDT27_TPD0.dsl.
+# build_patch.sh — rebuild patch/acpi-override/SSDT27_TPD0.aml from patch/acpi-override/SSDT27_TPD0.dsl.
 #
 # Steps:
 #   1. Compile the patched DSL with iasl.
@@ -13,8 +13,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-SRC="$REPO_DIR/patch/SSDT27_TPD0.dsl"
-OUT="$REPO_DIR/patch/SSDT27_TPD0.aml"
+SRC="$REPO_DIR/patch/acpi-override/SSDT27_TPD0.dsl"
+OUT="$REPO_DIR/patch/acpi-override/SSDT27_TPD0.aml"
 
 command -v iasl    >/dev/null || { echo "missing iasl (install acpica)" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "missing python3" >&2; exit 1; }

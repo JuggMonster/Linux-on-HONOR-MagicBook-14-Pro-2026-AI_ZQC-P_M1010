@@ -15,8 +15,8 @@
 #      is missing from sound/hda/codecs/realtek/alc269.c quirk table.
 #      Step [6/8] rebuilds snd-hda-codec-alc269.ko with the SND_PCI_QUIRK
 #      entry our hardware needs (matches the existing HONOR BRB-X M1010
-#      sibling); see patch/install-alc269-fix.sh and the upstream patch
-#      at patch/alc269-honor-zqc-p-m1010.patch.
+#      sibling); see patch/headset-mic/install.sh and the upstream patch
+#      at patch/headset-mic/alc269-honor-zqc-p-m1010.patch.
 #   4) PREVENTIVE — SOF DSP IPC4 copier stale-payload race on suspend/
 #      resume. On Intel Panther Lake the IPC4 copier widget's
 #      ipc_config_data buffer is cached at first ipc_prepare and reused;
@@ -32,8 +32,8 @@
 #      upstream backport, (b) the workflow that triggers it is
 #      application-driven and may surface later, and (c) it is
 #      defensive — no behavioural change when the race doesn't fire.
-#      See patch/install-sof-ipc4-fix.sh and the patch file:
-#      patch/0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch
+#      See patch/sof-audio/install.sh and the patch file:
+#      patch/sof-audio/0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch
 #      Upstream tracking issue: thesofproject/sof#10700.
 #   5) HONOR EC mic-privacy storm on KEY_MICMUTE (WMI 0x287). HONOR EC
 #      firmware fires the mic-privacy WMI event 0x287 autonomously in
@@ -48,8 +48,8 @@
 #      = default 2000 ms) and drops both events; legitimate single
 #      Fn+F7 press emits normally with at most 2 s latency. Set
 #      `micmute_storm_window_ms=0` via /sys to disable the filter.
-#      See patch/install-huawei-wmi-fix.sh and
-#      patch/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch.
+#      See patch/micmute/install.sh and
+#      patch/micmute/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch.
 #
 # Fn+F7 mic-mute already works out of the box on this hardware via the
 # huawei-wmi driver (separate "Huawei WMI hotkeys" input device emits
@@ -99,9 +99,9 @@ echo "    OK"
 # [2/8] Install patched SSDT and mkinitcpio install hook.
 #────────────────────────────────────────────────────────────────────────
 echo "[2/8] Install patched SSDT + mkinitcpio hook"
-install -Dm0644 "$PATCH_DIR/SSDT27_TPD0.aml" \
+install -Dm0644 "$PATCH_DIR/acpi-override/SSDT27_TPD0.aml" \
                 /usr/lib/firmware/acpi/SSDT27_TPD0.aml
-install -Dm0755 "$PATCH_DIR/acpi_override.install" \
+install -Dm0755 "$PATCH_DIR/acpi-override/acpi_override.install" \
                 /etc/initcpio/install/acpi_override
 echo "    /usr/lib/firmware/acpi/SSDT27_TPD0.aml"
 echo "    /etc/initcpio/install/acpi_override"
@@ -164,12 +164,12 @@ fi
 # quirk (e.g. after upstream merge), it exits without rebuilding.
 #────────────────────────────────────────────────────────────────────────
 echo "[6/8] Apply ALC256 headset-mic quirk (snd-hda-codec-alc269 rebuild)"
-if bash "$PATCH_DIR/install-alc269-fix.sh"; then
+if bash "$PATCH_DIR/headset-mic/install.sh"; then
     echo "    OK"
 else
     echo "    [warn] ALC256 quirk install failed — touchpad/touchscreen fix is"
     echo "    still applied; only the analog headset mic on the 3.5mm jack will"
-    echo "    stay unavailable. Inspect patch/install-alc269-fix.sh output above."
+    echo "    stay unavailable. Inspect patch/headset-mic/install.sh output above."
 fi
 
 #────────────────────────────────────────────────────────────────────────
@@ -183,16 +183,16 @@ fi
 # The script is idempotent: if upstream has already merged the fix (or
 # our overlay is already in place), it exits without rebuilding.
 # Skipped silently if kernel lockdown / module.sig_enforce blocks
-# unsigned modules — see patch/install-sof-ipc4-fix.sh for details.
+# unsigned modules — see patch/sof-audio/install.sh for details.
 #────────────────────────────────────────────────────────────────────────
 echo "[7/8] Apply SOF IPC4 copier-payload refresh (snd-sof rebuild)"
-if bash "$PATCH_DIR/install-sof-ipc4-fix.sh"; then
+if bash "$PATCH_DIR/sof-audio/install.sh"; then
     echo "    OK"
 else
     echo "    [warn] SOF IPC4 fix install failed — earlier steps are still"
     echo "    applied; only the Fn+F7 mic-mute stability after suspend/resume"
     echo "    on Panther Lake will be affected. Inspect"
-    echo "    patch/install-sof-ipc4-fix.sh output above."
+    echo "    patch/sof-audio/install.sh output above."
 fi
 
 #────────────────────────────────────────────────────────────────────────
@@ -206,16 +206,16 @@ fi
 # The script is idempotent: if upstream has already merged the fix
 # (or our overlay is already in place), it exits without rebuilding.
 # Skipped silently if kernel lockdown / module.sig_enforce blocks
-# unsigned modules — see patch/install-huawei-wmi-fix.sh for details.
+# unsigned modules — see patch/micmute/install.sh for details.
 #────────────────────────────────────────────────────────────────────────
 echo "[8/8] Apply huawei-wmi KEY_MICMUTE storm-detection (huawei-wmi rebuild)"
-if bash "$PATCH_DIR/install-huawei-wmi-fix.sh"; then
+if bash "$PATCH_DIR/micmute/install.sh"; then
     echo "    OK"
 else
     echo "    [warn] huawei-wmi storm-detection install failed — earlier steps"
     echo "    are still applied; only the EC privacy-storm pair suppression"
     echo "    on KEY_MICMUTE will be affected. Inspect"
-    echo "    patch/install-huawei-wmi-fix.sh output above."
+    echo "    patch/micmute/install.sh output above."
 fi
 
 cat <<EOF
@@ -279,8 +279,8 @@ After reboot, verify:
   cat /sys/class/leds/platform::micmute/brightness
     expect: brightness=0 when mic is meant to be active (no stuck mute)
 
-  # After every kernel update, re-run patch/install-alc269-fix.sh,
-  # patch/install-sof-ipc4-fix.sh, AND patch/install-huawei-wmi-fix.sh
+  # After every kernel update, re-run patch/headset-mic/install.sh,
+  # patch/sof-audio/install.sh, AND patch/micmute/install.sh
   # so the codec quirk + SOF overlay + huawei-wmi storm-detection are
   # rebuilt against the new headers.
 EOF

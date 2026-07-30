@@ -39,7 +39,7 @@ fi
 
 MODNAME="honor-zqcp-hwmon"
 MODVER="1.0"
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/fan" && pwd)"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Override with KVER=... to build for a kernel other than the running one -
 # needed when a kernel update is installed but not yet booted, since the
 # headers for the running kernel are gone at that point.
@@ -166,7 +166,7 @@ Done. Fan speeds now show up in:
     btop / KDE sensors / GNOME extensions — anything reading hwmon
 
 Remember: this is a read-only tachometer. The EC owns the fan curve and
-ignores every OS-side control path on this machine (see the script header
-and the Fans section of README.md).
+ignores every OS-side control path on this machine — see patch/fan/README.md
+for the measured fan behaviour and which control paths were tested.
 
 EOF

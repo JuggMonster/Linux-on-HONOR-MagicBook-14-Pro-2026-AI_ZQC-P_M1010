@@ -7,7 +7,7 @@
 # original is backed up so uninstall_patch.sh can restore it.
 #
 # This is a workaround for as long as the upstream patch under
-# patch/alc269-honor-zqc-p-m1010.patch has not yet landed in the kernel
+# patch/headset-mic/alc269-honor-zqc-p-m1010.patch has not yet landed in the kernel
 # being used. Once the entry is in
 # the running kernel's alc269.c, this script becomes a no-op (it will
 # detect the existing entry and skip the rebuild).
@@ -213,7 +213,7 @@ with open(src_path, "w") as f:
 PYEOF
     if ! grep -q '0x1ee7, 0x209d' "${WORK}/alc269.c"; then
         echo "[fatal] could not insert the SND_PCI_QUIRK line — upstream layout changed" >&2
-        echo "        review patch/alc269-honor-zqc-p-m1010.patch and adjust." >&2
+        echo "        review patch/headset-mic/alc269-honor-zqc-p-m1010.patch and adjust." >&2
         exit 1
     fi
     echo "[ok] inserted SND_PCI_QUIRK for 1ee7:209d HONOR ZQC-P M1010"

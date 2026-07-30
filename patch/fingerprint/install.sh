@@ -229,7 +229,7 @@ If enrollment works, enable it for login/sudo:
 Caveats:
   * A distro libfprint update will overwrite this build — re-run this script.
     On Arch the durable answer is a local PKGBUILD carrying the patch, so
-    pacman owns the files; see patch/fingerprint-PKGBUILD.example.
+    pacman owns the files; see patch/fingerprint/PKGBUILD.
   * Enrollment takes 12 samples on this sensor family. Place the finger
     firmly and shift position slightly between touches.
 

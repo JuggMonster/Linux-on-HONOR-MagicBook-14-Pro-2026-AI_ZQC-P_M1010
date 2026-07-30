@@ -43,7 +43,7 @@
 #     sound/soc/sof/ipc4-topology.c   (+33 lines)
 #
 # This is a workaround for as long as the upstream patch under
-# patch/0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch
+# patch/sof-audio/0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch
 # has not yet landed in the kernel being used. Once the change is in the
 # running kernel's ipc4-topology.c this script becomes a no-op (it will
 # detect the existing edit and skip the rebuild, removing any stale overlay).
