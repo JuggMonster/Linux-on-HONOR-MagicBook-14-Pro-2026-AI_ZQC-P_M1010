@@ -1,0 +1,73 @@
+# Maintainer: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
+# Contributor: Tom Gundersen <teg@jklm.no>
+# Contributor: Thomas Baechler <thomas@archlinux.org>
+
+pkgname=libfprint
+pkgver=1.94.100
+pkgrel=1.2
+pkgdesc="Library for fingerprint readers (+ HONOR ZQC-P Goodix 27c6:6f94 id)"
+url="https://fprint.freedesktop.org/"
+arch=(x86_64)
+license=(LGPL-2.1-or-later)
+depends=(
+  libgcc
+  glib2
+  glibc
+  libgudev
+  libgusb
+  openssl
+  pixman
+)
+makedepends=(
+  git
+  glib2-devel
+  gobject-introspection
+  gtk-doc
+  meson
+  python-cairo
+  python-gobject
+  systemd
+)
+checkdepends=(
+  cairo
+  umockdev
+)
+provides=(libfprint-2.so)
+groups=(fprint)
+source=("git+https://gitlab.freedesktop.org/libfprint/libfprint.git?signed#tag=v$pkgver"
+        "libfprint-goodixmoc-honor-zqc-p-6f94.patch")
+b2sums=('56cbe62a6d4b98d1de90f45bae8de605418802d1b4d8d5dc55a8557a65045b115df51daf8385decdebd8aea79c86103467d5a327cbd461030d450f0e15466d08'
+        'SKIP')
+validpgpkeys=(
+  D4C501DA48EB797A081750939449C2F50996635F # Marco Trevisan (Treviño) <mail@3v1n0.net>
+)
+
+prepare() {
+  cd $pkgname
+  # HONOR MagicBook Pro 14 AI (ZQC-P): register Goodix 27c6:6f94 in goodixmoc.
+  if ! grep -q 0x6F94 libfprint/drivers/goodixmoc/goodix.c; then
+    patch -p1 < "$srcdir/libfprint-goodixmoc-honor-zqc-p-6f94.patch"
+  fi
+}
+
+build() {
+  local meson_options=(
+    # Add virtual drivers for integration tests (e.g. in fprintd)
+    -D drivers=all
+
+    -D installed-tests=false
+  )
+
+  arch-meson $pkgname build "${meson_options[@]}"
+  meson compile -C build
+}
+
+check() {
+  : # skipped: id-table-only change, upstream suite needs umockdev
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+}
+
+# vim:set sw=2 sts=-1 et:
