@@ -50,7 +50,10 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-KVER=$(uname -r)
+# Override with KVER=... to build for a kernel other than the running one -
+# needed when a kernel update is installed but not yet booted, since the
+# headers for the running kernel are gone at that point.
+KVER="${KVER:-$(uname -r)}"
 BUILD_DIR="/usr/lib/modules/${KVER}/build"
 UPDATES_DIR="/usr/lib/modules/${KVER}/updates"
 KO_NAME="huawei-wmi.ko.zst"
@@ -163,15 +166,16 @@ if ! patch -p4 --no-backup-if-mismatch -d "$WORK" < "$PATCH_FILE"; then
     exit 1
 fi
 
-# Minimal out-of-tree build Makefile.
-cat > "${WORK}/Makefile" <<'EOF'
+# Minimal out-of-tree build Makefile. KDIR is baked in from $BUILD_DIR rather
+# than derived from `uname -r`, so a KVER override actually reaches the build.
+cat > "${WORK}/Makefile" <<EOF
 obj-m += huawei-wmi.o
-KDIR := /lib/modules/$(shell uname -r)/build
-PWD  := $(shell pwd)
+KDIR := ${BUILD_DIR}
+PWD  := \$(shell pwd)
 default:
-	$(MAKE) -C $(KDIR) M=$(PWD) LLVM=1 LLVM_IAS=1 modules
+	\$(MAKE) -C \$(KDIR) M=\$(PWD) LLVM=1 LLVM_IAS=1 modules
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	\$(MAKE) -C \$(KDIR) M=\$(PWD) clean
 EOF
 
 echo "[*] building huawei-wmi.ko (LLVM toolchain)"

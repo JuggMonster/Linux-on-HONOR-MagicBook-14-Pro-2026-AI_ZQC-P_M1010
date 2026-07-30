@@ -47,7 +47,7 @@ The repo contains everything needed to:
 | **BIOS** | HONOR 1.09 (2026-03-19) |
 | **Touchpad** | Goodix **TOPS0102** on `\_SB.PC00.I2C1.TPD0` (I²C HID, addr `0x5D`) |
 | **Touchscreen** | FocalTech **FTSC1000** on `\_SB.PC00.I2C2.TPL1` (I²C HID) |
-| **Fingerprint** | Goodix USB `27c6:6f94` (separate problem, see below) |
+| **Fingerprint** | Goodix USB `27c6:6f94` — works with a two-line `libfprint` patch, see [Fingerprint status](#fingerprint-status) |
 | **Webcam (built-in)** | Shinetech FHD over USB (`3277:00de`) — works out of the box |
 
 Both touch devices are advertised in firmware with `_HID/_CID = PNP0C50`
@@ -849,15 +849,33 @@ This is a property of the EC firmware on the ZQC-P/M1010 and **is not
 something this patch fixes** — it's documented here so you know what to
 expect.
 
-**What you'll observe under Linux (no HONOR PC Manager):**
+**What you'll observe under Linux (no HONOR PC Manager).** Measured on
+2026-07-30 with `honor-zqcp-hwmon` installed, on AC, `platform_profile` =
+`performance`, 16 threads of an AVX FMA loop. `EC-CPU` is the EC's own CPU
+temperature byte (ECF0 `0x10`), which is what the EC actually regulates on —
+it runs several degrees above the `coretemp` package reading:
 
-- At idle and under light/medium load (CPU package up to ~60 °C), the
-  fans are completely silent. The EC keeps them off; you might think
-  they don't work at all.
-- Under sustained heavy load (compile-from-scratch, ML inference, etc.),
-  once CPU package crosses roughly **85 °C** the EC engages the fans
-  autonomously. Exhaust fan ramps to ~80 % PWM (audibly loud); intake
-  fan follows more conservatively.
+| EC-CPU | fan 0 | fan 1 | |
+|---|---|---|---|
+| 49 °C (idle, fresh boot) | **0** | **0** | fans genuinely stopped |
+| 51-68 °C | 0 | 0 | still stopped, load already ramping |
+| **72 °C** | **2355** | **1913** | **engagement point** |
+| 79 °C | 2379 | 2136 | |
+| 84 °C | 2455 | 2373 | |
+| 89 °C (earlier session) | 3656 | 3276 | clearly audible |
+
+Two things worth knowing:
+
+- **At idle from a cold boot the fans are completely off** (0 rpm), which is
+  why the machine can feel like it has no working fans at all.
+- **There is a long spin-down hysteresis.** After the load stopped, the fans
+  briefly rose *further* (2859 / 2468 while the EC dumped soak heat), then
+  stepped down slowly and were still turning at ~2450 / ~2130 a full minute
+  later at 48 °C. So a non-zero reading at low temperature usually means
+  "recently under load", not "idle speed".
+
+You can watch all of this live once `honor-zqcp-hwmon` is installed (see
+[Fan speed readout](#fan-speed-readout-honor-zqcp-hwmon) below).
 - Intel RAPL package power is firmware-capped at **50 W** (not the 88 W
   advertised through the `intel_rapl` constraints) — the cap is
   enforced by the EC via the `VCCC` register, not by Intel RAPL itself.
@@ -897,8 +915,58 @@ definitions and method bodies). The relevant EC field offsets are:
 | `PPL4` | ECF6 | 0x24 | Power-limit 4 (peak). Written by `SVRF`. |
 | `SCPM` | ECF5 @ `0xFE0B0500` | 0x32 | System CPU Performance Mode. Written by `SPPM`; in this firmware revision it accepts values 0–3 but has no observable effect on PL1 or clocks. |
 | `FWMD` | ECF5 | 0x31 | Fan Working Mode. Written by `SFNM`. |
-| `FA0L` / `FA1L` | ECF0 @ `0xFE0B0000` | 0x2C / 0x2E | Per-fan **PWM duty 0..255** (this is the actual fan target the EC uses). Written by `SFNS`, but only if `EC.MFGM == 1`. |
+| `FA0L`+`FA0R` / `FA1L`+`FA1R` | ECF0 @ `0xFE0B0000` | 0x2C-0x2D / 0x2E-0x2F | Per-fan **tachometer, 16-bit little-endian RPM** — read-only. See the correction note below. |
+| `F0PD` / `F1PD` | ECF5 @ `0xFE0B0500` | 0x3B / 0x3C | Per-fan **PWM duty**. Written by `SFNS`, but only if `EC.MFGM == 1`. |
 | `MFGM` | ECF0 | 0x0F bit 0 | Master manual-fan enable. Not writable from ASL — only the EC firmware sets this. |
+
+> **Correction (2026-07-30).** An earlier revision of this README described
+> `FA0L`/`FA1L` as "PWM duty 0..255". That was wrong. The DSDT splits each
+> tachometer into two named 8-bit fields, which made the low byte look like a
+> duty value and the high byte like a status flag. They are one little-endian
+> word per fan: `0x2C|0x2D<<8` and `0x2E|0x2F<<8`, reading out as sane RPMs
+> that track temperature. Settled beyond doubt by the load test above: the
+> pair reads 0/0 with the fans stopped and 2355/1913 the instant they engage —
+> a single PWM duty byte cannot hold 2355. The same offsets were confirmed
+> independently on the sibling FMB-P in
+> [colorcube PR #21](https://github.com/colorcube/Linux-on-Honor-Magicbook-14-Pro/pull/21).
+> The actual PWM duty registers are `F0PD`/`F1PD` in the ECF5 bank.
+
+### Fan control is not available (tested)
+
+Every OS-side path to *drive* the fans on this machine is a dead end:
+
+- **`SFNS` (WMI manual fan duty)** is gated on `EC.MFGM == 1`, and no AML path
+  anywhere in the firmware ever sets `MFGM`. Only the EC sets it, for its own
+  reasons.
+- **DPTF fan participant `TFN1`** (`INTC10D6`, `/sys/class/thermal/cooling_device0`,
+  51 states) *accepts* `cur_state` writes — but the EC ignores them. Verified
+  directly: driving `cur_state` from 0 to 50 (max) produced **zero** change in
+  either tachometer over 8 seconds at steady 47 °C. The firmware's `_FSL` is
+  effectively a stub.
+- **`acpi_fan`'s `fan1_input`** (the hwmon node the ACPI fan participant
+  registers) returns `-ENODEV` on read, because the firmware's `_FST` is a stub
+  too. That is why the machine appears to have no fan sensor at all until you
+  install `honor-zqcp-hwmon`.
+
+So the fan curve belongs to the EC, full stop. The only remaining lever is the
+indirect one: change the *thermal envelope* (via `SVRF`/`VCCC`) so the EC
+decides to cool harder — sketched below, still unwritten.
+
+### Fan speed readout (`honor-zqcp-hwmon`)
+
+`patch/fan/honor-zqcp-hwmon.c` is a small DMI-gated hwmon module that reads the
+two tachometers over the standard ACPI EC interface and exposes them as
+`fan1_input` / `fan2_input`, so `sensors`, `btop`, and desktop widgets show
+fan RPM. Install with:
+
+```bash
+sudo bash patch/install-fan-hwmon.sh
+sensors                     # look for "honor_zqcp-isa-0000"
+```
+
+It uses DKMS when available so it survives kernel updates, and refuses to load
+on any machine whose DMI is not `HONOR / ZQC-P`. It is read-only by design —
+see the section directly above for why nothing else is possible.
 
 `ECF0` (the first 256 bytes of EC RAM) is accessible through the
 standard ACPI EC interface: `sudo modprobe ec_sys` then read
@@ -1115,7 +1183,7 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 | Intel DTT — `IETM` root | ACPI `INTC10D4`, `int3400_thermal` (thermal_zone1) | Intel Dynamic Tuning Technology | ✅ |
 | Thermal sensors SEN1..SEN7 | ACPI `INTC10D5`, `int3403_thermal` (thermal_zone2..8) | Intel DTT virtual thermal sensors | ✅ |
 | Thermal fan participant TFN1 | ACPI `INTC10D6`, `int3404_fan` | Intel DTT fan | ✅ |
-| **CPU/exhaust fans (physical)** | EC `FA0L`/`FA1L` PWM via HONOR WMI `WMAA` | HONOR PC Manager fan control | ⚠️ *engages only above ~85 °C CDTS — see [Cooling system](#cooling-system--fan-behaviour)* |
+| **CPU/exhaust fans (physical)** | EC tachometers at ECF0 `0x2C-0x2F` via `honor-zqcp-hwmon`; PWM duty `F0PD`/`F1PD` locked behind `MFGM` | HONOR PC Manager fan control | ⚠️ *RPM readout works; control is impossible from the OS, and the EC only ramps hard above ~85 °C CDTS — see [Cooling system](#cooling-system--fan-behaviour)* |
 | Battery charge participant | ACPI `INTC10D5` (CHRG) | Intel DTT charger | ✅ |
 | CPU package / per-core temp | `coretemp`, `x86_pkg_temp_thermal` (thermal_zone9..12) | hwmon equivalents | ✅ |
 | WiFi thermal | `iwlwifi_1` (thermal_zone11) | (vendor private) | ✅ |
@@ -1127,7 +1195,7 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 
 | Component | Linux identifier / driver | Windows identifier / driver | Status |
 |---|---|---|---|
-| **Fingerprint — Goodix USB** | USB `27c6:6f94`, "Goodix USB2.0 MISC" (no in-tree driver yet) | `oem32.inf` Goodix Biometric (custom MOC driver) | ⚠️ device visible, [needs `libfprint`/`fprintd`](#fingerprint-status) — exact PID may not be supported upstream |
+| **Fingerprint — Goodix USB** | USB `27c6:6f94`, "Goodix USB2.0 MISC" → `libfprint` `goodixmoc` driver | `oem32.inf` Goodix Biometric (custom MOC driver) | ✅ works after a [two-line `libfprint` id patch](#fingerprint-status) |
 | NFC — NXP NTAG | ACPI `NTAG0001` → `i2c-NTAG0001:00`, no driver bound | `\Driver\SpbNfcDriver` | ❌ no in-tree Linux driver — appears as bare I²C device |
 | Microsoft HID button helper (HIDD) | ACPI `INTC10CC`, status=0 | Microsoft HID button collection | ➖ disabled in firmware |
 | Intel Acoustic Context Mgr (ACM) | ACPI `INTC1025`, status=null | Intel Acoustic Context Manager | ➖ no `_STA` returned by firmware |
@@ -1142,30 +1210,82 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 
 ### Fingerprint status
 
-The fingerprint reader is the Goodix USB MOC sensor `27c6:6f94`. Linux sees
-the device but won't recognise it for `fprintd`/`libfprint` out of the box;
-support for individual Goodix PIDs is added piecewise upstream. To try:
+**Solved (2026-07-30) — a two-line `libfprint` patch.**
+
+The reader is the Goodix match-on-chip sensor `27c6:6f94` ("Goodix USB2.0
+MISC", vendor-specific class, 2 bulk endpoints, firmware `01010106`). It is a
+**pure USB device** — the DSDT's `FPNT` node is an inactive SPI slot meant for
+other SKUs (`_STA` returns 0 because the EC reports `FPTT == 0`), so none of
+this depends on the ACPI override this repo ships.
+
+It speaks the ordinary `goodixmoc` protocol that `libfprint` has supported for
+years. It was simply missing from the driver's id table: upstream already
+carries `0x6984`, `0x6A94`, `0x6594` and the rest of the family, but not
+`0x6F94`. Adding the id — plus the `max_enroll_stage = 12` case the whole
+family shares — is the entire fix. No protocol reverse-engineering, no TOD
+blob, no vendor driver.
 
 ```bash
-sudo pacman -S fprintd libfprint
-fprintd-enroll
+sudo bash patch/install-fingerprint-fix.sh
+
+# then, as your normal user:
+fprintd-enroll -f right-index-finger     # 12 touches on the power button
+fprintd-verify
 ```
 
-If `fprintd-enroll` errors out with "no devices available", `libfprint` does
-not yet support this exact PID. The community-maintained `libfprint-tod`
-binary blob from Lenovo / HONOR drivers sometimes covers it — but that is
-outside the scope of this repo's ACPI fix.
+Verified on this machine: with the patch applied the device is claimed by the
+`goodixmoc` driver, opens cleanly, reports its firmware version, and answers a
+template-list query. The patch itself is
+`patch/libfprint-goodixmoc-honor-zqc-p-6f94.patch`:
+
+```c
+     case 0x6984:
++    case 0x6F94:
+       self->max_enroll_stage = 12;
+...
+   { .vid = 0x27c6,  .pid = 0x6984,  },
++  { .vid = 0x27c6,  .pid = 0x6F94,  },
+```
+
+**Upstream status:** absent from `libfprint` master as of 2026-07-30 (checked
+at commit `c4654fd`). This is a trivially reviewable id addition and should be
+sent upstream; once it lands, drop the local patch.
+
+**Note on persistence.** On Arch/CachyOS the installer does *not* drop files
+into `/usr` — it builds a real package (`patch/fingerprint-PKGBUILD`, derived
+from Arch's own, with the patch applied in `prepare()`) and installs it with
+`pacman -U`, bumping `pkgrel` past the repo's so it is unambiguously newer.
+This matters: a bare `ninja install` leaves unowned files in `/usr`, and the
+very next `pacman -S fprintd` then fails with
+`libfprint: /usr/lib/libfprint-2.so exists in filesystem`, because `fprintd`
+pulls `libfprint` in as a dependency. Letting pacman own the files avoids that
+entirely and makes the patch visible in `pacman -Qi libfprint`.
+
+A future distro update to a **newer** `libfprint` version will still replace it
+— re-run the installer then. Verified working state on this machine:
+
+```
+$ pacman -Q libfprint fprintd
+libfprint 1.94.100-1.2
+fprintd 1.94.5-2.1
+$ fprintd-list $USER
+found 1 devices
+Device at /net/reactivated/Fprint/Device/0
+User x2e has no fingers enrolled for Goodix MOC Fingerprint Sensor.
+```
 
 ### What this patch does *not* fix
 
 - **Caps Lock LED** stays dark — the `i8042.dumbkbd=1` quirk that fixes
   the internal keyboard also disables atkbd's `SET_LEDS` path. See
   [Caps Lock LED — known limitation](#caps-lock-led--known-limitation).
-- **Early fan engagement** — fans only engage above ~85 °C package
-  temp on Linux, as opposed to ~55 °C on Windows + HONOR PC Manager.
-  This is an EC firmware policy; see
-  [Cooling system / fan behaviour](#cooling-system--fan-behaviour) for
-  the explanation and the path to a future userspace daemon.
+- **Fan control** — the EC owns the fan curve outright and ignores every
+  OS-side control path (`SFNS` is locked behind `MFGM`; the DPTF `TFN1`
+  cooling device accepts writes but has no effect — both tested). Fans are
+  fully off at idle and only engage around 72 °C EC-CPU temp,
+  as opposed to ~55 °C on Windows + HONOR PC Manager. RPM *readout* is
+  solved by `honor-zqcp-hwmon`; see
+  [Cooling system / fan behaviour](#cooling-system--fan-behaviour).
 - MIPI / IPU6 internal cameras are not configured (no sensor on this SKU).
 - Some OEM helper ACPI devices remain disabled by firmware (`INTC10CC`
   HID Discovery, `INTC10DF` TSE, etc.) — they are not required for any
