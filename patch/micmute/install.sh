@@ -73,7 +73,19 @@ log "installing to ${INSTALL_DIR}/${OBJ_NAME}"
 udev-hid-bpf install --force "${WORK}/${OBJ_NAME}" >/dev/null
 udevadm control --reload
 
-# --- 5. apply to the live device and verify -----------------------------------
+# --- 5. boot-time re-apply service --------------------------------------------
+# The udev attach races with the hid-generic -> hid-multitouch handover at
+# boot; see the comment at the top of hid-bpf-reapply.sh. This service fixes
+# it up once the device has settled, and is a no-op when the race was won.
+log "installing the boot-time re-apply service"
+install -d -m 0755 /usr/local/lib/honor-zqcp
+install -m 0755 "${SCRIPT_DIR}/hid-bpf-reapply.sh" /usr/local/lib/honor-zqcp/
+install -m 0644 "${SCRIPT_DIR}/honor-hid-bpf-reapply.service" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable honor-hid-bpf-reapply.service >/dev/null 2>&1 \
+    || warn "could not enable honor-hid-bpf-reapply.service"
+
+# --- 6. apply to the live device and verify -----------------------------------
 DEV=""
 for d in /sys/bus/hid/devices/*2808:5662*; do [[ -e "$d" ]] && DEV="$d"; done
 
@@ -83,9 +95,13 @@ if [[ -z "$DEV" ]]; then
     exit 0
 fi
 
+# Detach first: re-attaching is what makes the kernel recompute the fixed
+# report descriptor. A plain trigger does nothing when the program is already
+# loaded but was attached too early to take effect.
 log "applying to ${DEV##*/}"
-udevadm trigger --action=add --subsystem-match=hid "$DEV"
-udevadm settle
+udev-hid-bpf remove "$DEV" >/dev/null 2>&1 || true
+sleep 1
+udev-hid-bpf add "$DEV" "${INSTALL_DIR}/${OBJ_NAME}" >/dev/null 2>&1 || true
 sleep 1
 
 PHANTOM=""
@@ -103,12 +119,16 @@ cat <<EOF
 
   BPF object : ${INSTALL_DIR}/${OBJ_NAME}
   udev rule  : ${RULES_FILE}
+  boot fixup : honor-hid-bpf-reapply.service
 
   Nothing to redo after a kernel update.
 
   Uninstall:
-      sudo rm ${INSTALL_DIR}/${OBJ_NAME} ${RULES_FILE}
-      sudo udevadm control --reload
+      sudo systemctl disable --now honor-hid-bpf-reapply.service
+      sudo rm ${INSTALL_DIR}/${OBJ_NAME} ${RULES_FILE} \\
+              /etc/systemd/system/honor-hid-bpf-reapply.service \\
+              /usr/local/lib/honor-zqcp/hid-bpf-reapply.sh
+      sudo systemctl daemon-reload && sudo udevadm control --reload
       reboot
 
   Verify (must print nothing):

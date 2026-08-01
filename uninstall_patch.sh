@@ -71,6 +71,10 @@ rm -fv /etc/pacman.d/hooks/95-honor-zqcp-kernel-modules.hook \
 rmdir --ignore-fail-on-non-empty /usr/local/lib/honor-zqcp 2>/dev/null || true
 
 echo "[7/8] Remove the HID-BPF mic-mute fixup and any legacy module overlays"
+systemctl disable --now honor-hid-bpf-reapply.service 2>/dev/null || true
+rm -fv /etc/systemd/system/honor-hid-bpf-reapply.service \
+       /usr/local/lib/honor-zqcp/hid-bpf-reapply.sh
+systemctl daemon-reload 2>/dev/null || true
 rm -fv /etc/udev-hid-bpf/honor-ftsc1000-micmute.bpf.o \
        /etc/udev/rules.d/99-hid-bpf-honor-ftsc1000-micmute.rules
 udevadm control --reload 2>/dev/null || true

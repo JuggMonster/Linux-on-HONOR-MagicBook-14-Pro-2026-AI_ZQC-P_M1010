@@ -1,0 +1,13 @@
+[Unit]
+Description=Re-apply the HONOR ZQC-P HID-BPF mic-mute fixup after udev settles
+Documentation=file:///usr/local/lib/honor-zqcp/hid-bpf-reapply.sh
+After=multi-user.target
+ConditionPathExists=/etc/udev-hid-bpf/honor-ftsc1000-micmute.bpf.o
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/honor-zqcp/hid-bpf-reapply.sh
+
+[Install]
+WantedBy=multi-user.target
