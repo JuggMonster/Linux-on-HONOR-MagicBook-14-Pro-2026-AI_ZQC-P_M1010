@@ -31,8 +31,9 @@ hook fills in.
 ```
 /etc/pacman.d/hooks/95-honor-zqcp-kernel-modules.hook
 /etc/pacman.d/hooks/96-honor-zqcp-libfprint.hook
-/usr/local/lib/honor-zqcp/rebuild.sh
-/etc/honor-zqcp-autorebuild.conf        REPO= and BUILD_USER=
+/usr/local/lib/honor-zqcp/rebuild.sh     hook dispatcher
+/usr/local/lib/honor-zqcp/deferred.sh    runs outside the transaction
+/etc/honor-zqcp-autorebuild.conf         REPO= and BUILD_USER=
 ```
 
 | Hook | Trigger | Action |
@@ -40,11 +41,18 @@ hook fills in.
 | `95-…-kernel-modules` | any `usr/lib/modules/*/vmlinuz` installed or upgraded | rebuilds `headset-mic` and `sof-audio` for each kernel named in the transaction, in `PostTransaction` |
 | `96-…-libfprint` | `libfprint` installed or upgraded | re-applies the fingerprint patch |
 
-The fingerprint rebuild cannot run inside the transaction, because it calls
-`pacman -U` and the database is locked. It is handed to a transient systemd
-unit that waits for the lock to clear, then runs the installer. `makepkg`
-refuses to run as root, so `BUILD_USER` records the account that installed the
-hooks.
+Neither rebuild runs inside the transaction. Both are handed to a transient
+systemd unit that waits for `/var/lib/pacman/db.lck` to clear, then runs the
+installers. Two reasons: the fingerprint fix calls `pacman -U` and would
+deadlock on the database, and every installer fetches its sources from the
+matching kernel tag, which was observed to fail with an immediate connection
+error when run from inside a transaction. A long build should not hold the
+transaction open either. `makepkg` refuses to run as root, so `BUILD_USER`
+records the account that installed the hooks.
+
+The deferred work lives in its own script, `deferred.sh`, rather than being
+passed to `systemd-run` as a command line: systemd expands `$VAR` in `ExecStart`
+itself and would consume the script's own loop variables.
 
 Every step logs to `/var/log/honor-zqcp-autorebuild.log`, and the dispatcher
 always exits 0, so a failure reports itself without breaking the transaction.

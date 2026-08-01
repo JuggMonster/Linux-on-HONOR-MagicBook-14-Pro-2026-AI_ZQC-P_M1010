@@ -42,7 +42,7 @@ log "repository = ${REPO}"
 log "build user = ${BUILD_USER}"
 
 install -d -m 0755 "$LIB_DIR" "$HOOK_DIR"
-install -m 0755 "${SCRIPT_DIR}/rebuild.sh" "${LIB_DIR}/rebuild.sh"
+install -m 0755 "${SCRIPT_DIR}/rebuild.sh" "${SCRIPT_DIR}/deferred.sh" "${LIB_DIR}/"
 install -m 0644 "${SCRIPT_DIR}/95-honor-zqcp-kernel-modules.hook" "$HOOK_DIR/"
 install -m 0644 "${SCRIPT_DIR}/96-honor-zqcp-libfprint.hook"      "$HOOK_DIR/"
 
@@ -63,6 +63,7 @@ cat <<EOF
   ${HOOK_DIR}/95-honor-zqcp-kernel-modules.hook
   ${HOOK_DIR}/96-honor-zqcp-libfprint.hook
   ${LIB_DIR}/rebuild.sh
+  ${LIB_DIR}/deferred.sh
   ${CONF}
 
   From now on a kernel update rebuilds patch/headset-mic/ and
@@ -79,6 +80,6 @@ cat <<EOF
 
   Uninstall:
       sudo rm ${HOOK_DIR}/9[56]-honor-zqcp-*.hook \\
-              ${LIB_DIR}/rebuild.sh ${CONF}
+              ${LIB_DIR}/rebuild.sh ${LIB_DIR}/deferred.sh ${CONF}
 ════════════════════════════════════════════════════════════════════
 EOF

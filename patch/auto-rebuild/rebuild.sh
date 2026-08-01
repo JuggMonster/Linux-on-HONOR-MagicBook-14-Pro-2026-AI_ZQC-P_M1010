@@ -48,10 +48,31 @@ run_fix() {
 
 mode="${1:-}"
 
+DEFERRED=/usr/local/lib/honor-zqcp/deferred.sh
+
+# Everything that needs the network or the pacman database has to run outside
+# the transaction, so it is handed to a transient unit that waits for the
+# database lock. Passing the work as a command line to systemd-run does not
+# work: systemd expands $VAR in ExecStart itself and would eat the script's own
+# variables, hence a real script file.
+defer() {
+    local unit="$1"; shift
+    if [[ ! -x "$DEFERRED" ]]; then
+        log "missing $DEFERRED - re-run patch/auto-rebuild/install.sh"
+        return 1
+    fi
+    if ! command -v systemd-run >/dev/null; then
+        log "systemd-run unavailable - run the installers by hand"
+        return 1
+    fi
+    systemd-run --quiet --collect --unit="$unit" \
+        --setenv=REPO="$REPO" --setenv=LOG="$LOG" "$@" \
+        "$DEFERRED" "${unit##*-}" \
+        || { log "could not schedule $unit"; return 1; }
+}
+
 case "$mode" in
 modules)
-    { echo; echo "=== $(date -Is) modules ==="; } >>"$LOG"
-
     declare -A kvers=()
     while read -r target; do
         [[ "$target" =~ ^/?usr/lib/modules/([^/]+)/ ]] && kvers["${BASH_REMATCH[1]}"]=1
@@ -68,39 +89,15 @@ modules)
         exit 0
     fi
 
-    for k in "${!kvers[@]}"; do
-        if [[ ! -e "/usr/lib/modules/${k}/build/Makefile" ]]; then
-            log "no kernel headers for ${k} - skipping"
-            log "  install linux-*-headers for it, then run: sudo KVER=${k} bash ${REPO}/apply_patch.sh"
-            continue
-        fi
-        run_fix headset-mic "$k"
-        run_fix sof-audio   "$k"
-    done
+    log "scheduling a rebuild for: ${!kvers[*]}"
+    log "  progress: $LOG"
+    defer honor-zqcp-rebuild-modules --setenv=KVERS="${!kvers[*]}"
     ;;
 
 fingerprint)
-    # The libfprint fix builds a package and installs it with pacman -U, which
-    # cannot happen inside a transaction. Defer it to a transient unit that
-    # waits for the database lock to clear.
-    if ! command -v systemd-run >/dev/null; then
-        log "libfprint was updated - the fingerprint patch is gone."
-        log "  re-apply it with: sudo bash ${REPO}/patch/fingerprint/install.sh"
-        exit 0
-    fi
-    log "libfprint updated - re-applying the fingerprint patch in the background"
+    log "libfprint updated, re-applying the fingerprint patch in the background"
     log "  progress: $LOG"
-    systemd-run --quiet --collect --unit=honor-zqcp-fingerprint-rebuild \
-        --setenv=SUDO_USER="$BUILD_USER" \
-        /bin/bash -c "
-            { echo; echo '=== '\$(date -Is)' fingerprint ==='; } >>'$LOG'
-            for _ in \$(seq 1 120); do
-                [[ -e /var/lib/pacman/db.lck ]] || break
-                sleep 5
-            done
-            bash '${REPO}/patch/fingerprint/install.sh' >>'$LOG' 2>&1 \
-                || echo 'fingerprint rebuild FAILED' >>'$LOG'
-        " || log "  could not schedule the rebuild - run the installer by hand"
+    defer honor-zqcp-rebuild-fingerprint --setenv=BUILD_USER="$BUILD_USER"
     ;;
 
 *)
