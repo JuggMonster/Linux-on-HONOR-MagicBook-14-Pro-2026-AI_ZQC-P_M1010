@@ -22,11 +22,16 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-KVER=$(uname -r)
+# Override with KVER=... to build for a kernel other than the running one -
+# needed when a kernel update is installed but not yet booted, and used by
+# the pacman hook in patch/auto-rebuild/.
+KVER="${KVER:-$(uname -r)}"
 BUILD_DIR="/usr/lib/modules/${KVER}/build"
-MODULES_DIR="/usr/lib/modules/${KVER}/kernel/sound/hda/codecs/realtek"
+INTREE_DIR="/usr/lib/modules/${KVER}/kernel/sound/hda/codecs/realtek"
+UPDATES_DIR="/usr/lib/modules/${KVER}/updates"
 KO_NAME="snd-hda-codec-alc269.ko.zst"
-KO_PATH="${MODULES_DIR}/${KO_NAME}"
+KO_INTREE="${INTREE_DIR}/${KO_NAME}"
+KO_OVERLAY="${UPDATES_DIR}/${KO_NAME}"
 BACKUP="/root/${KO_NAME}.orig"
 WORK=$(mktemp -d /tmp/alc269-fix-XXXXXX)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,7 +57,7 @@ if ! command -v hda-verb >/dev/null; then
 fi
 
 echo "[*] kernel = ${KVER}"
-echo "[*] target = ${KO_PATH}"
+echo "[*] target = ${KO_OVERLAY}"
 
 # Remove the previous-iteration systemd workaround if it's still installed.
 # It was a userspace hotfix for the same problem this kernel fixup now
@@ -78,8 +83,36 @@ has_quirk() {
     [[ -f "$1" ]] || return 1
     ( set +o pipefail; zstdcat "$1" 2>/dev/null | grep -aqF $'\xe7\x1e\x9d\x20' )
 }
-if has_quirk "$KO_PATH"; then
+# An older revision of this script installed the patched module *over* the
+# in-tree one, which a kernel package update then silently reverted. If that
+# is still the case here, put the pristine module back before continuing, but
+# only when the backup actually belongs to this kernel.
+if [[ -f "$BACKUP" ]] && has_quirk "$KO_INTREE"; then
+    BACKUP_VERMAGIC=$(modinfo -F vermagic "$BACKUP" 2>/dev/null | awk '{print $1}')
+    if [[ "$BACKUP_VERMAGIC" == "$KVER" ]]; then
+        echo "[*] undoing a legacy in-place install: restoring $KO_INTREE"
+        install -m 0644 "$BACKUP" "$KO_INTREE"
+    else
+        echo "[warn] $KO_INTREE carries the quirk and a backup exists, but the"
+        echo "       backup is for ${BACKUP_VERMAGIC:-an unknown kernel}, not ${KVER}."
+        echo "       Leaving the in-tree module alone."
+    fi
+fi
+
+if has_quirk "$KO_INTREE"; then
     echo "[ok] in-tree alc269 already contains the ZQC-P quirk — nothing to do."
+    if [[ -f "$KO_OVERLAY" ]]; then
+        echo "[*] removing redundant overlay $KO_OVERLAY"
+        rm -f "$KO_OVERLAY"
+        rmdir --ignore-fail-on-non-empty "$UPDATES_DIR" 2>/dev/null || true
+        depmod -a "$KVER"
+    fi
+    remove_legacy_jack_service
+    exit 0
+fi
+
+if has_quirk "$KO_OVERLAY"; then
+    echo "[ok] patched overlay already present at $KO_OVERLAY — nothing to do."
     remove_legacy_jack_service
     exit 0
 fi
@@ -219,20 +252,22 @@ PYEOF
     echo "[ok] inserted SND_PCI_QUIRK for 1ee7:209d HONOR ZQC-P M1010"
 fi
 
-cat > "${WORK}/Makefile" <<'EOF'
-KDIR := /lib/modules/$(shell uname -r)/build
-PWD  := $(shell pwd)
+# KDIR is baked in from $BUILD_DIR rather than derived from `uname -r`, so a
+# KVER override actually reaches the build.
+cat > "${WORK}/Makefile" <<EOF
+KDIR := ${BUILD_DIR}
+PWD  := \$(shell pwd)
 
 obj-m += snd-hda-codec-alc269.o
 snd-hda-codec-alc269-y := alc269.o
 
-ccflags-y += -I$(src)
+ccflags-y += -I\$(src)
 
 default:
-	$(MAKE) -C $(KDIR) M=$(PWD) CC=clang LLVM=1 modules
+	\$(MAKE) -C \$(KDIR) M=\$(PWD) CC=clang LLVM=1 modules
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	\$(MAKE) -C \$(KDIR) M=\$(PWD) clean
 EOF
 
 echo "[*] building module"
@@ -242,20 +277,11 @@ if [[ ! -f "${WORK}/snd-hda-codec-alc269.ko" ]]; then
     exit 1
 fi
 
-if has_quirk "$KO_PATH"; then
-    echo "[ok] installed module already patched — nothing more to do."
-    exit 0
-fi
-
-if [[ ! -f "$BACKUP" ]]; then
-    echo "[*] backing up original $KO_PATH → $BACKUP"
-    cp -a "$KO_PATH" "$BACKUP"
-fi
-
-echo "[*] installing patched module"
+echo "[*] installing patched module as an overlay"
 zstd -19 -q --force "${WORK}/snd-hda-codec-alc269.ko" -o "${WORK}/${KO_NAME}"
-install -m 0644 "${WORK}/${KO_NAME}" "$KO_PATH"
-depmod -a
+install -d -m 0755 "$UPDATES_DIR"
+install -m 0644 "${WORK}/${KO_NAME}" "$KO_OVERLAY"
+depmod -a "$KVER"
 
 # Drop the legacy systemd hotfix if a previous run of this script
 # installed it — the kernel-side fixup makes it redundant.
@@ -275,6 +301,10 @@ echo "  so the analog mic path is wired up at codec probe + every init,"
 echo "  including after S3/S4 resume. No userspace jack-detect helper"
 echo "  is needed."
 echo
-echo "  Original module backed up at: $BACKUP"
-echo "  Re-run this script after every kernel update to keep the fix."
+echo "  Installed as an overlay at: $KO_OVERLAY"
+echo "  The in-tree module is left untouched; delete the overlay and run"
+echo "  'depmod -a' to revert."
+echo
+echo "  Kernel updates are handled automatically if patch/auto-rebuild/ is"
+echo "  installed. Otherwise re-run this script after every kernel update."
 echo "════════════════════════════════════════════════════════════════════"

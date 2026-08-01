@@ -13,7 +13,7 @@
 #      (see README for the trade-off with Caps Lock LED).
 #   3) Analog 3.5mm-jack headset microphone unusable — PCI SSID 1ee7:209d
 #      is missing from sound/hda/codecs/realtek/alc269.c quirk table.
-#      Step [6/8] rebuilds snd-hda-codec-alc269.ko with the SND_PCI_QUIRK
+#      Step [6/9] rebuilds snd-hda-codec-alc269.ko with the SND_PCI_QUIRK
 #      entry our hardware needs (matches the existing HONOR BRB-X M1010
 #      sibling); see patch/headset-mic/install.sh and the upstream patch
 #      at patch/headset-mic/alc269-honor-zqc-p-m1010.patch.
@@ -22,7 +22,7 @@
 #      ipc_config_data buffer is cached at first ipc_prepare and reused;
 #      on resume the host/link DMA channels are re-allocated with new
 #      tags but the stale cached payload still gets sent to firmware,
-#      producing a ChainDMA collision and DSP panic. Step [7/8] backports
+#      producing a ChainDMA collision and DSP panic. Step [7/9] backports
 #      the upstream fix (thesofproject/linux PR #5762 by @ujfalusi) and
 #      installs the rebuilt snd-sof.ko in the modules updates/ overlay.
 #      Note: on this specific HONOR ZQC-P unit the upstream race was
@@ -43,11 +43,16 @@
 #      collection becomes an input device whose only key is
 #      KEY_MICMUTE. All 59 data bytes carry that usage and hid-input
 #      sets EV_REP, so one vendor report leaves the key held down and
-#      auto-repeating at ~30 Hz. Step [8/8] installs a HID-BPF
+#      auto-repeating at ~30 Hz. Step [8/9] installs a HID-BPF
 #      rdesc_fixup that rewrites the usage page to 0xff00, which
 #      hid-input ignores. Touchscreen, touchpad and the real Fn+F7
 #      (which arrives over WMI, not HID) are unaffected.
 #      See patch/micmute/.
+#   6) The fixes in steps [6/9] and [7/9] live inside kernel modules that
+#      a kernel package update replaces, and the fingerprint patch lives
+#      in libfprint, which a libfprint update replaces. Step [9/9]
+#      installs pacman hooks that rebuild them automatically, so nothing
+#      silently reverts. See patch/auto-rebuild/.
 #
 # Fn+F7 mic-mute already works out of the box on this hardware via the
 # huawei-wmi driver (separate "Huawei WMI hotkeys" input device emits
@@ -79,9 +84,9 @@ req cp
 mkdir -p "$BACKUP"
 
 #────────────────────────────────────────────────────────────────────────
-# [1/8] Backup everything we are about to touch.
+# [1/9] Backup everything we are about to touch.
 #────────────────────────────────────────────────────────────────────────
-echo "[1/8] Backup → $BACKUP"
+echo "[1/9] Backup → $BACKUP"
 cp -a /etc/mkinitcpio.conf                   "$BACKUP/mkinitcpio.conf"
 [[ -d /usr/lib/firmware/acpi ]] && \
     cp -a /usr/lib/firmware/acpi             "$BACKUP/firmware-acpi"
@@ -94,9 +99,9 @@ cp -a /etc/mkinitcpio.conf                   "$BACKUP/mkinitcpio.conf"
 echo "    OK"
 
 #────────────────────────────────────────────────────────────────────────
-# [2/8] Install patched SSDT and mkinitcpio install hook.
+# [2/9] Install patched SSDT and mkinitcpio install hook.
 #────────────────────────────────────────────────────────────────────────
-echo "[2/8] Install patched SSDT + mkinitcpio hook"
+echo "[2/9] Install patched SSDT + mkinitcpio hook"
 install -Dm0644 "$PATCH_DIR/acpi-override/SSDT27_TPD0.aml" \
                 /usr/lib/firmware/acpi/SSDT27_TPD0.aml
 install -Dm0755 "$PATCH_DIR/acpi-override/acpi_override.install" \
@@ -105,9 +110,9 @@ echo "    /usr/lib/firmware/acpi/SSDT27_TPD0.aml"
 echo "    /etc/initcpio/install/acpi_override"
 
 #────────────────────────────────────────────────────────────────────────
-# [3/8] Wire acpi_override into HOOKS=… (right after autodetect).
+# [3/9] Wire acpi_override into HOOKS=… (right after autodetect).
 #────────────────────────────────────────────────────────────────────────
-echo "[3/8] Patch /etc/mkinitcpio.conf"
+echo "[3/9] Patch /etc/mkinitcpio.conf"
 if ! grep -qE '^HOOKS=.*\bacpi_override\b' /etc/mkinitcpio.conf; then
     sed -i 's/\bautodetect\b/autodetect acpi_override/' /etc/mkinitcpio.conf
     echo "    + acpi_override added to HOOKS"
@@ -122,9 +127,9 @@ fi
 echo "    HOOKS=$(grep -E '^HOOKS=' /etc/mkinitcpio.conf)"
 
 #────────────────────────────────────────────────────────────────────────
-# [4/8] Append i8042.dumbkbd=1 to Limine default cmdline (idempotent).
+# [4/9] Append i8042.dumbkbd=1 to Limine default cmdline (idempotent).
 #────────────────────────────────────────────────────────────────────────
-echo "[4/8] Patch /etc/default/limine (i8042.dumbkbd=1)"
+echo "[4/9] Patch /etc/default/limine (i8042.dumbkbd=1)"
 if [[ -f /etc/default/limine ]]; then
     if ! grep -qE 'i8042\.dumbkbd=1' /etc/default/limine; then
         sed -i 's|^\(KERNEL_CMDLINE\[default\]+="[^"]*\)"$|\1 i8042.dumbkbd=1"|' \
@@ -140,9 +145,9 @@ else
 fi
 
 #────────────────────────────────────────────────────────────────────────
-# [5/8] Rebuild initramfs and regenerate Limine config.
+# [5/9] Rebuild initramfs and regenerate Limine config.
 #────────────────────────────────────────────────────────────────────────
-echo "[5/8] Rebuild initramfs"
+echo "[5/9] Rebuild initramfs"
 if command -v limine-update >/dev/null; then
     limine-update
 else
@@ -152,7 +157,7 @@ else
 fi
 
 #────────────────────────────────────────────────────────────────────────
-# [6/8] Build + install ALC256 codec quirk for the 3.5mm-jack headset mic.
+# [6/9] Build + install ALC256 codec quirk for the 3.5mm-jack headset mic.
 # Fetches the running kernel's alc269.c from the upstream stable tree,
 # adds SND_PCI_QUIRK(0x1ee7, 0x209d, "HONOR ZQC-P M1010", …) — pin 0x19
 # is wired to the combo jack mic on this board, identical to the existing
@@ -161,7 +166,7 @@ fi
 # The script is idempotent: if the in-tree module already carries the
 # quirk (e.g. after upstream merge), it exits without rebuilding.
 #────────────────────────────────────────────────────────────────────────
-echo "[6/8] Apply ALC256 headset-mic quirk (snd-hda-codec-alc269 rebuild)"
+echo "[6/9] Apply ALC256 headset-mic quirk (snd-hda-codec-alc269 rebuild)"
 if bash "$PATCH_DIR/headset-mic/install.sh"; then
     echo "    OK"
 else
@@ -171,7 +176,7 @@ else
 fi
 
 #────────────────────────────────────────────────────────────────────────
-# [7/8] Build + install SOF IPC4 copier-payload refresh patch
+# [7/9] Build + install SOF IPC4 copier-payload refresh patch
 # (thesofproject/linux PR #5762 by @ujfalusi). Fetches the running
 # kernel's sound/soc/sof/ tree from the upstream stable tree, applies the
 # 33-line ipc4-topology.c fix, builds snd-sof.ko out-of-tree and drops
@@ -183,7 +188,7 @@ fi
 # Skipped silently if kernel lockdown / module.sig_enforce blocks
 # unsigned modules — see patch/sof-audio/install.sh for details.
 #────────────────────────────────────────────────────────────────────────
-echo "[7/8] Apply SOF IPC4 copier-payload refresh (snd-sof rebuild)"
+echo "[7/9] Apply SOF IPC4 copier-payload refresh (snd-sof rebuild)"
 if bash "$PATCH_DIR/sof-audio/install.sh"; then
     echo "    OK"
 else
@@ -194,20 +199,37 @@ else
 fi
 
 #────────────────────────────────────────────────────────────────────────
-# [8/8] Build + install the HID-BPF phantom-KEY_MICMUTE fixup.
+# [8/9] Build + install the HID-BPF phantom-KEY_MICMUTE fixup.
 # Builds patch/micmute/honor-ftsc1000-micmute.bpf.c against the running
 # kernel's BTF and installs it through udev-hid-bpf into
 # /etc/udev-hid-bpf/ with a matching udev rule. Nothing has to be
 # repeated after a kernel update. Requires clang, bpftool and
 # udev-hid-bpf.
 #────────────────────────────────────────────────────────────────────────
-echo "[8/8] Remove phantom KEY_MICMUTE device (HID-BPF descriptor fixup)"
+echo "[8/9] Remove phantom KEY_MICMUTE device (HID-BPF descriptor fixup)"
 if bash "$PATCH_DIR/micmute/install.sh"; then
     echo "    OK"
 else
     echo "    [warn] HID-BPF fixup install failed — earlier steps are still"
     echo "    applied; only the self-toggling microphone will be affected."
     echo "    Inspect patch/micmute/install.sh output above."
+fi
+
+#────────────────────────────────────────────────────────────────────────
+# [9/9] Install pacman hooks that re-apply the fixes a package update
+# would otherwise revert: a kernel update replaces the modules patched in
+# steps [6/9] and [7/9], and a libfprint update drops the fingerprint
+# patch. The hooks rebuild them automatically. Arch-like systems only.
+#────────────────────────────────────────────────────────────────────────
+echo "[9/9] Install auto-rebuild pacman hooks"
+if command -v pacman >/dev/null && bash "$PATCH_DIR/auto-rebuild/install.sh" >/dev/null; then
+    echo "    OK — kernel and libfprint updates will re-apply the fixes"
+elif ! command -v pacman >/dev/null; then
+    echo "    skipped — not a pacman system. Re-run patch/headset-mic/install.sh"
+    echo "    and patch/sof-audio/install.sh after every kernel update."
+else
+    echo "    [warn] hook install failed — the fixes still work, but a kernel"
+    echo "    update will revert steps [6/9] and [7/9] until you re-run them."
 fi
 
 cat <<EOF

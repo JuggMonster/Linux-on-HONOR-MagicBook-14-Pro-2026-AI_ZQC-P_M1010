@@ -1,0 +1,16 @@
+# Rebuild the HONOR ZQC-P kernel-module fixes whenever a kernel is installed
+# or upgraded. Without this, a kernel update silently reverts them.
+#
+# Installed by patch/auto-rebuild/install.sh into /etc/pacman.d/hooks/.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/modules/*/vmlinuz
+
+[Action]
+Description = Rebuilding HONOR ZQC-P kernel module fixes...
+When = PostTransaction
+Exec = /usr/local/lib/honor-zqcp/rebuild.sh modules
+NeedsTargets

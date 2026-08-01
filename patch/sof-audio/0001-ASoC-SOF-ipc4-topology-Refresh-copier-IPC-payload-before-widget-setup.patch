@@ -36,11 +36,13 @@ Signed-off-by: Peter Ujfalusi <peter.ujfalusi@linux.intel.com>
  sound/soc/sof/ipc4-topology.c | 33 +++++++++++++++++++++++++++++++++
  1 file changed, 33 insertions(+)
 
+Rebased against v7.1.5 (2026-08-01); the original hunks were cut against
+the 7.0.x tree and no longer matched.
+
 diff --git a/sound/soc/sof/ipc4-topology.c b/sound/soc/sof/ipc4-topology.c
-index 5a1f3b359f8a12..57af7830062297 100644
---- a/sound/soc/sof/ipc4-topology.c
-+++ b/sound/soc/sof/ipc4-topology.c
-@@ -3186,6 +3186,15 @@ static int sof_ipc4_widget_setup(struct snd_sof_dev *sdev, struct snd_sof_widget
+@@ -3149,26 +3149,59 @@
+ 			return 0;
+ 
  		ipc_size = ipc4_copier->ipc_config_size;
  		ipc_data = ipc4_copier->ipc_config_data;
  
@@ -56,7 +58,8 @@ index 5a1f3b359f8a12..57af7830062297 100644
  		msg = &ipc4_copier->msg;
  		break;
  	}
-@@ -3194,6 +3203,9 @@ static int sof_ipc4_widget_setup(struct snd_sof_dev *sdev, struct snd_sof_widget
+ 	case snd_soc_dapm_dai_in:
+ 	case snd_soc_dapm_dai_out:
  	{
  		struct snd_sof_dai *dai = swidget->private;
  		struct sof_ipc4_copier *ipc4_copier = dai->private;
@@ -66,7 +69,8 @@ index 5a1f3b359f8a12..57af7830062297 100644
  
  		pipeline = pipe_widget->private;
  		if (pipeline->use_chain_dma)
-@@ -3202,6 +3214,27 @@ static int sof_ipc4_widget_setup(struct snd_sof_dev *sdev, struct snd_sof_widget
+ 			return 0;
+ 
  		ipc_size = ipc4_copier->ipc_config_size;
  		ipc_data = ipc4_copier->ipc_config_data;
  
@@ -94,3 +98,5 @@ index 5a1f3b359f8a12..57af7830062297 100644
  		msg = &ipc4_copier->msg;
  		break;
  	}
+ 	case snd_soc_dapm_pga:
+ 	{

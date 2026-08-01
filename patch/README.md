@@ -19,6 +19,7 @@ kernel 7.1.5.
 | Fan RPM readout | works | [`fan/`](fan/) — `honor-zqcp-hwmon` module |
 | Fan control | not available | [`fan/README.md`](fan/README.md) — every OS-side path was tested, the EC ignores all of them |
 | SOF DSP suspend/resume panic | preventive | [`sof-audio/`](sof-audio/) — upstream IPC4 backport; the race never reproduced on this unit |
+| Fixes reverted by package updates | handled | [`auto-rebuild/`](auto-rebuild/) — pacman hooks that rebuild them automatically |
 
 ## Installing
 
@@ -34,21 +35,28 @@ sudo bash patch/fingerprint/install.sh
 sudo bash patch/fan/install.sh
 ```
 
-## After a kernel update
+## Surviving updates
 
-| Fix | Action needed |
-|---|---|
-| `micmute/` | none, the BPF object is CO-RE |
-| `acpi-override/` | none |
-| `fingerprint/` | none, it patches `libfprint`, not the kernel |
-| `fan/` | none when DKMS is installed, otherwise re-run |
-| `headset-mic/` | **re-run**, the kernel package overwrites the patched module |
-| `sof-audio/` | **re-run** |
+With [`auto-rebuild/`](auto-rebuild/) installed, nothing has to be redone by
+hand. `apply_patch.sh` installs it as its last step.
+
+| Fix | What an update does | Handled by |
+|---|---|---|
+| `acpi-override/` | nothing, it is a firmware file | — |
+| `micmute/` | nothing, the BPF object is CO-RE | — |
+| `fan/` | rebuilt automatically | DKMS |
+| `headset-mic/` | a kernel update leaves the new kernel without the overlay | `auto-rebuild/` hook |
+| `sof-audio/` | same | `auto-rebuild/` hook |
+| `fingerprint/` | a libfprint update replaces the patched package | `auto-rebuild/` hook |
+
+Without the hooks, re-run `headset-mic/install.sh` and `sof-audio/install.sh`
+after every kernel update, and `fingerprint/install.sh` after every libfprint
+update.
 
 On a rolling distribution you will regularly have a kernel installed but not
 yet booted, at which point the running kernel's headers no longer exist and
-nothing can build. `fan/` and the module-level fixes accept a `KVER` override
-to pre-build for the installed kernel instead:
+nothing can build. `fan/`, `headset-mic/` and `sof-audio/` accept a `KVER`
+override to pre-build for the installed kernel instead:
 
 ```sh
 sudo KVER=7.1.5-1-cachyos bash patch/fan/install.sh

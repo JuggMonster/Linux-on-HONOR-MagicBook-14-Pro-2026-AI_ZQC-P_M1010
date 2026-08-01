@@ -40,3 +40,17 @@ the physical device.
 This is the most obviously upstreamable change in the repo — a single table
 entry, exactly like the hundreds already in that file. It should be submitted
 to `alsa-devel`; once merged, drop this directory.
+
+## Surviving kernel updates
+
+The rebuilt module is installed as `/usr/lib/modules/$KVER/updates/snd-hda-codec-alc269.ko.zst`,
+an overlay `depmod` prefers over the packaged one, so a kernel update never
+overwrites it. It does leave the *new* kernel without an overlay, which is what
+the pacman hook in [`../auto-rebuild/`](../auto-rebuild/) fills in
+automatically. Without that hook, re-run `install.sh` after every kernel
+update, or pre-build with `KVER=` for a kernel that is installed but not yet
+booted.
+
+Earlier revisions installed the module *over* the packaged one. `install.sh`
+detects that, restores the pristine file when the backup matches the kernel,
+and switches to the overlay.

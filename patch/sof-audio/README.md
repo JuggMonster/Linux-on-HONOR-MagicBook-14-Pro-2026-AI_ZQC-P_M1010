@@ -54,3 +54,15 @@ modules `updates/` overlay so it loads instead of the in-tree module.
 
 Re-run after every kernel update. Becomes unnecessary once the fix reaches the
 kernel you run — at that point delete the overlay and this directory.
+
+## Surviving kernel updates
+
+`snd-sof.ko` goes into the `updates/` overlay, so a kernel update does not
+overwrite it, but a new kernel starts without one. The pacman hook in
+[`../auto-rebuild/`](../auto-rebuild/) rebuilds it automatically.
+
+The source list is read from `sound/soc/sof/` in the matching kernel tag rather
+than hardcoded, because that directory's contents drift between versions. The
+patch itself was rebased against v7.1.5 on 2026-08-01; if a future kernel moves
+the code it targets, `install.sh` exits with code `3` and the hook reports the
+fix as *not applicable* rather than failing.

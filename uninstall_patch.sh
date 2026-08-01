@@ -9,13 +9,13 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-echo "[1/7] Remove patched SSDT"
+echo "[1/8] Remove patched SSDT"
 rm -fv /usr/lib/firmware/acpi/SSDT27_TPD0.aml
 
-echo "[2/7] Remove mkinitcpio install hook"
+echo "[2/8] Remove mkinitcpio install hook"
 rm -fv /etc/initcpio/install/acpi_override
 
-echo "[3/7] Strip acpi_override from /etc/mkinitcpio.conf and i8042.dumbkbd=1 from cmdline"
+echo "[3/8] Strip acpi_override from /etc/mkinitcpio.conf and i8042.dumbkbd=1 from cmdline"
 sed -i 's/ acpi_override//' /etc/mkinitcpio.conf
 echo "    HOOKS=$(grep -E '^HOOKS=' /etc/mkinitcpio.conf)"
 
@@ -26,7 +26,10 @@ fi
 
 KVER=$(uname -r)
 
-echo "[4/7] Restore original snd-hda-codec-alc269.ko.zst (if backup present)"
+echo "[4/8] Remove the ALC256 codec-quirk overlay"
+rm -fv "/usr/lib/modules/${KVER}/updates/snd-hda-codec-alc269.ko.zst" 2>/dev/null || true
+
+echo "[4b/8] Restore original snd-hda-codec-alc269.ko.zst if a legacy in-place install is present"
 ALC_PATH="/usr/lib/modules/${KVER}/kernel/sound/hda/codecs/realtek/snd-hda-codec-alc269.ko.zst"
 ALC_BACKUP="/root/snd-hda-codec-alc269.ko.zst.orig"
 if [[ -f "$ALC_BACKUP" ]]; then
@@ -48,7 +51,7 @@ rm -f /etc/systemd/system/honor-mic-jack-init.service \
       /usr/local/bin/honor-mic-jack-init.sh
 systemctl daemon-reload 2>/dev/null || true
 
-echo "[5/7] Remove SOF IPC4 fix overlay (if present)"
+echo "[5/8] Remove SOF IPC4 fix overlay (if present)"
 SOF_OVERLAY="/usr/lib/modules/${KVER}/updates/snd-sof.ko.zst"
 SOF_BACKUP="/root/snd-sof.ko.zst.orig"
 if [[ -f "$SOF_OVERLAY" ]]; then
@@ -58,7 +61,14 @@ else
 fi
 [[ -f "$SOF_BACKUP" ]] && echo "    in-tree backup at $SOF_BACKUP retained for next install."
 
-echo "[6/7] Remove the HID-BPF mic-mute fixup and any legacy module overlays"
+echo "[6/8] Remove the auto-rebuild pacman hooks"
+rm -fv /etc/pacman.d/hooks/95-honor-zqcp-kernel-modules.hook \
+       /etc/pacman.d/hooks/96-honor-zqcp-libfprint.hook \
+       /usr/local/lib/honor-zqcp/rebuild.sh \
+       /etc/honor-zqcp-autorebuild.conf
+rmdir --ignore-fail-on-non-empty /usr/local/lib/honor-zqcp 2>/dev/null || true
+
+echo "[7/8] Remove the HID-BPF mic-mute fixup and any legacy module overlays"
 rm -fv /etc/udev-hid-bpf/honor-ftsc1000-micmute.bpf.o \
        /etc/udev/rules.d/99-hid-bpf-honor-ftsc1000-micmute.rules
 udevadm control --reload 2>/dev/null || true
@@ -74,7 +84,7 @@ done
 rmdir --ignore-fail-on-non-empty "/usr/lib/modules/${KVER}/updates" 2>/dev/null || true
 depmod -a "$KVER"
 
-echo "[7/7] Rebuild initramfs + bootloader config"
+echo "[8/8] Rebuild initramfs + bootloader config"
 if command -v limine-update >/dev/null; then
     limine-update
 else

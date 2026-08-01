@@ -58,7 +58,9 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-KVER=$(uname -r)
+# Override with KVER=... to build for a kernel other than the running one -
+# used by the pacman hook in patch/auto-rebuild/.
+KVER="${KVER:-$(uname -r)}"
 BUILD_DIR="/usr/lib/modules/${KVER}/build"
 UPDATES_DIR="/usr/lib/modules/${KVER}/updates"
 KO_NAME="snd-sof.ko.zst"
@@ -128,15 +130,23 @@ fi
 TAG="v${KVER%%-*}"
 BASE_URL="https://raw.githubusercontent.com/gregkh/linux/${TAG}"
 
-fetch() {
-    local rel="$1" dest="$2"
-    local code
+# Returns non-zero instead of aborting, so callers can decide. Files that do
+# not exist at a given tag are normal: the SOF file list drifts between kernel
+# versions and we build whatever that version actually has.
+fetch_opt() {
+    local rel="$1" dest="$2" code
     mkdir -p "$(dirname "$dest")"
     code=$(curl -sSL --max-time 60 -o "$dest" -w '%{http_code}' "${BASE_URL}/${rel}")
-    if [[ "$code" != "200" ]]; then
-        echo "[fatal] fetch failed: ${BASE_URL}/${rel} (HTTP $code)" >&2
+    [[ "$code" == "200" ]] && return 0
+    rm -f "$dest"
+    return 1
+}
+
+fetch() {
+    fetch_opt "$1" "$2" || {
+        echo "[fatal] fetch failed: ${BASE_URL}/${1}" >&2
         exit 1
-    fi
+    }
 }
 
 # Detect whether the running kernel's in-tree ipc4-topology.c already has
@@ -181,31 +191,66 @@ if overlay_is_patched; then
     exit 0
 fi
 
-# Fetch all sof/ common sources + the handful of cross-tree headers that
-# sof-acpi-dev.c references. We deliberately skip sound/soc/sof/{intel,amd,
-# imx,mediatek,xtensa}/ — those produce separate platform modules that are
-# not affected by this patch and pulling them in would cascade into much
-# wider dependencies (codec sources, SoundWire, etc.).
-echo "[*] fetching SOF common sources at tag ${TAG}"
-SOF_FILES=(
-    Makefile Kconfig
-    compress.c control.c core.c debug.c fw-file-profile.c iomem-utils.c
-    ipc3.c ipc3-control.c ipc3-dtrace.c ipc3-loader.c ipc3-pcm.c
-    ipc3-priv.h ipc3-topology.c
-    ipc4.c ipc4-control.c ipc4-fw-reg.h ipc4-loader.c ipc4-mtrace.c
-    ipc4-pcm.c ipc4-priv.h ipc4-telemetry.c ipc4-telemetry.h
-    ipc4-topology.c ipc4-topology.h
-    ipc.c loader.c nocodec.c ops.c ops.h pcm.c pm.c
-    sof-acpi-dev.c sof-audio.c sof-audio.h sof-client.c sof-client.h
-    sof-client-ipc-flood-test.c sof-client-ipc-msg-injector.c
-    sof-client-ipc-kernel-injector.c sof-client-probes.c
-    sof-client-probes.h sof-client-probes-ipc3.c sof-client-probes-ipc4.c
-    sof-of-dev.c sof-of-dev.h sof-pci-dev.c sof-priv.h sof-utils.c sof-utils.h
-    stream-ipc.c stream-ipc.h topology.c trace.c
+# The file list is read from the tree itself rather than hardcoded: it drifts
+# between kernel versions, and a stale list means either a missing source or a
+# build against files that no longer exist. Only the top level of
+# sound/soc/sof/ is taken. The per-platform subdirectories (intel, amd, imx,
+# mediatek, xtensa) build separate modules that this patch does not touch, and
+# pulling them in would cascade into codec and SoundWire dependencies.
+echo "[*] listing sound/soc/sof at ${TAG}"
+mapfile -t SOF_FILES < <(
+    curl -sSL --max-time 60 \
+        "https://api.github.com/repos/gregkh/linux/contents/sound/soc/sof?ref=${TAG}" \
+    | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(entries, list):
+    sys.exit(1)
+for e in entries:
+    if e.get("type") != "file":
+        continue
+    n = e.get("name", "")
+    if n.endswith((".c", ".h")) or n in ("Makefile", "Kconfig"):
+        print(n)
+' || true
 )
+
+if (( ${#SOF_FILES[@]} < 20 )); then
+    echo "[fatal] could not list sound/soc/sof at ${TAG} (got ${#SOF_FILES[@]} entries)." >&2
+    echo "        GitHub API unreachable or rate-limited. Retry later." >&2
+    exit 1
+fi
+echo "[*] fetching ${#SOF_FILES[@]} SOF common sources"
 for f in "${SOF_FILES[@]}"; do
-    fetch "sound/soc/sof/${f}" "${WORK}/sof/${f}" 2>/dev/null \
-        || echo "  (skip: ${f} not in upstream tree at ${TAG})"
+    fetch "sound/soc/sof/${f}" "${WORK}/sof/${f}"
+done
+
+# sof-acpi-dev.c and friends include a few headers from the platform
+# subdirectories. Headers only: no .c files, so no extra objects are built.
+list_headers() {
+    curl -sSL --max-time 60 \
+        "https://api.github.com/repos/gregkh/linux/contents/sound/soc/sof/$1?ref=${TAG}" \
+    | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(entries, list):
+    sys.exit(0)
+for e in entries:
+    if e.get("type") == "file" and e.get("name", "").endswith(".h"):
+        print(e["name"])
+'
+}
+for sub in intel amd; do
+    while read -r h; do
+        [[ -n "$h" ]] || continue
+        fetch_opt "sound/soc/sof/${sub}/${h}" "${WORK}/sof/${sub}/${h}" || true
+    done < <(list_headers "$sub")
 done
 
 # sof-acpi-dev.c #includes "../../codecs/hdac_hda.h" via sound/soc/intel/.
@@ -214,22 +259,21 @@ done
 mkdir -p "${WORK}/intel/common"
 for h in soc-intel-quirks.h sof-function-topology-lib.h \
          soc-acpi-intel-sdca-quirks.h soc-acpi-intel-sdw-mockup-match.h; do
-    fetch "sound/soc/intel/common/${h}" "${WORK}/intel/common/${h}" 2>/dev/null \
-        || true
+    fetch_opt "sound/soc/intel/common/${h}" "${WORK}/intel/common/${h}" || true
 done
 
 # Apply our patch.
 echo "[*] applying ${PATCH_FILE##*/}"
 (
     cd "$WORK"
-    # Patch the file at its sof/-relative path: the patch header references
-    # sound/soc/sof/ipc4-topology.c but we have it at sof/ipc4-topology.c.
-    # Strip 3 levels (a/sound/soc/sof/...) instead of 1.
-    if ! patch -p3 --no-backup-if-mismatch -d sof < "$PATCH_FILE"; then
-        echo "[fatal] patch did not apply cleanly against ${TAG}'s ipc4-topology.c" >&2
-        echo "        upstream layout drifted — review the .rej files and"
-        echo "        adjust the patch or the script." >&2
-        exit 1
+    # The patch header references a/sound/soc/sof/ipc4-topology.c but the file
+    # is staged at sof/ipc4-topology.c, so strip all four leading components
+    # and apply inside sof/.
+    if ! patch -p4 --no-backup-if-mismatch -d sof < "$PATCH_FILE"; then
+        echo "[skip] the backport does not apply to ${TAG}'s ipc4-topology.c." >&2
+        echo "       That kernel's SOF tree has drifted from the one the patch" >&2
+        echo "       was written against. Nothing is installed for ${KVER}." >&2
+        exit 3
     fi
 )
 
@@ -246,6 +290,17 @@ sed -i -E '/^obj-\$\(CONFIG_SND_SOC_SOF_[A-Z_]+\) \+= [a-z]+\/$/d' \
 # do NOT delete anything that was there before.
 echo "[*] staging sources into ${BUILD_DIR}/sound/soc/sof"
 for f in "${WORK}/sof"/*; do
+    if [[ -d "$f" ]]; then
+        # platform subdirectory of headers (intel/, amd/) - copy the headers,
+        # never any .c, so kbuild does not try to build those modules
+        install -d -m 0755 "${BUILD_DIR}/sound/soc/sof/$(basename "$f")"
+        for h in "$f"/*.h; do
+            [[ -e "$h" ]] || continue
+            install -m 0644 "$h" \
+                "${BUILD_DIR}/sound/soc/sof/$(basename "$f")/$(basename "$h")"
+        done
+        continue
+    fi
     install -m 0644 "$f" "${BUILD_DIR}/sound/soc/sof/$(basename "$f")"
 done
 # sof-acpi-dev.c expects sound/soc/intel/common/soc-intel-quirks.h to be

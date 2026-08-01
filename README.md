@@ -16,6 +16,7 @@ own README, measurements, and installer.
 | Fan RPM readout | works | [`patch/fan/`](patch/fan/) — `honor-zqcp-hwmon` |
 | Fan control | not available | the EC owns the fan curve and ignores every OS-side path, see [`patch/fan/README.md`](patch/fan/README.md) |
 | SOF DSP suspend/resume panic | preventive | [`patch/sof-audio/`](patch/sof-audio/) — upstream IPC4 backport, the race never reproduced here |
+| Fixes reverted by package updates | handled | [`patch/auto-rebuild/`](patch/auto-rebuild/) — pacman hooks that rebuild them |
 | Caps Lock LED | dark | collateral of `i8042.dumbkbd=1`, see [Known limitations](#known-limitations) |
 | Fn+F7 mic-mute key itself | works out of the box | in-tree `huawei-wmi`, nothing to install |
 
@@ -99,9 +100,11 @@ sudo bash patch/fan/install.sh
 | 6 | Runs `patch/headset-mic/install.sh` — rebuilds `snd-hda-codec-alc269.ko` with the ALC256 quirk for PCI SSID `1ee7:209d` |
 | 7 | Runs `patch/sof-audio/install.sh` — builds `snd-sof.ko` with the IPC4 backport into the `updates/` overlay |
 | 8 | Runs `patch/micmute/install.sh` — builds and installs the HID-BPF descriptor fixup through `udev-hid-bpf` |
+| 9 | Runs `patch/auto-rebuild/install.sh` — installs the pacman hooks that keep steps 6, 7 and the fingerprint patch applied across package updates |
 
 Steps 6 and 7 are skipped with a warning if kernel lockdown or
-`module.sig_enforce=1` would block an unsigned module.
+`module.sig_enforce=1` would block an unsigned module. Step 9 is skipped on
+non-pacman systems.
 
 ### Verifying after reboot
 
@@ -129,12 +132,25 @@ sudo dmesg | grep 'picked fixup.*1ee7:209d'
 sensors | grep -A3 honor_zqcp
 ```
 
-### After a kernel update
+### Surviving package updates
 
-`patch/headset-mic/install.sh` and `patch/sof-audio/install.sh` must be re-run,
-because a kernel package update replaces the modules they patch. Everything
-else survives: the ACPI override is firmware data, the HID-BPF object is CO-RE,
-and the fan module uses DKMS.
+Both kernel-module fixes install into `/usr/lib/modules/$KVER/updates/`, which
+`depmod` searches before `kernel/`, so a package update never overwrites them.
+What it does do is produce a *new* kernel that has no `updates/` entry yet. The
+pacman hooks from step 9 fill that in automatically, and re-apply the
+fingerprint patch after a libfprint update.
+
+Everything else needs nothing: the ACPI override is firmware data, the HID-BPF
+object is CO-RE, and the fan module uses DKMS.
+
+Check what happened after an update:
+
+```bash
+sudo tail -40 /var/log/honor-zqcp-autorebuild.log
+```
+
+Details and the manual fallback are in
+[`patch/auto-rebuild/README.md`](patch/auto-rebuild/README.md).
 
 ---
 
@@ -297,6 +313,11 @@ HONOR_ZQC-P_M1010/
 │   │   ├── SSDT27_TPD0.aml         #   ready-to-install ACPI override (binary)
 │   │   ├── SSDT27_TPD0.dsl         #   human-readable source
 │   │   └── acpi_override.install   #   mkinitcpio install hook (early CPIO)
+│   ├── auto-rebuild/               # pacman hooks: keep fixes applied across updates
+│   │   ├── rebuild.sh              #   dispatcher, installed to /usr/local/lib/honor-zqcp/
+│   │   ├── 95-honor-zqcp-kernel-modules.hook
+│   │   ├── 96-honor-zqcp-libfprint.hook
+│   │   └── install.sh
 │   ├── micmute/                    # phantom KEY_MICMUTE from the touchscreen
 │   │   ├── honor-ftsc1000-micmute.bpf.c     # HID-BPF descriptor fixup
 │   │   └── install.sh              #   build + install via udev-hid-bpf

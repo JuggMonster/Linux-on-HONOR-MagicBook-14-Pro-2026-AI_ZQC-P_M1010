@@ -1,0 +1,18 @@
+# Re-apply the HONOR ZQC-P libfprint fingerprint patch after libfprint is
+# upgraded or reinstalled, which would otherwise drop it.
+#
+# The rebuild is deferred to a transient systemd unit, because it has to call
+# pacman and cannot run inside a transaction.
+#
+# Installed by patch/auto-rebuild/install.sh into /etc/pacman.d/hooks/.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = libfprint
+
+[Action]
+Description = Re-applying the HONOR ZQC-P fingerprint patch...
+When = PostTransaction
+Exec = /usr/local/lib/honor-zqcp/rebuild.sh fingerprint
