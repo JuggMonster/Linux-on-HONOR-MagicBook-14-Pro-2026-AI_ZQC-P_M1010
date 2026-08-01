@@ -20,6 +20,7 @@ kernel 7.1.5.
 | Fan control | not available | [`fan/README.md`](fan/README.md) — every OS-side path was tested, the EC ignores all of them |
 | SOF DSP suspend/resume panic | preventive | [`sof-audio/`](sof-audio/) — upstream IPC4 backport; the race never reproduced on this unit |
 | Fixes reverted by package updates | handled | [`auto-rebuild/`](auto-rebuild/) — pacman hooks that rebuild them automatically |
+| Internal keyboard, Caps Lock LED | upstream pending | [`keyboard-atkbd/`](keyboard-atkbd/) — an `atkbd` DMI quirk replaces `i8042.dumbkbd=1` and restores the LED; verified here, needs a kernel rebuild until merged |
 
 ## Installing
 

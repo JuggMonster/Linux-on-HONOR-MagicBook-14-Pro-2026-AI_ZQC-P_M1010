@@ -17,7 +17,7 @@ own README, measurements, and installer.
 | Fan control | not available | the EC owns the fan curve and ignores every OS-side path, see [`patch/fan/README.md`](patch/fan/README.md) |
 | SOF DSP suspend/resume panic | preventive | [`patch/sof-audio/`](patch/sof-audio/) — upstream IPC4 backport, the race never reproduced here |
 | Fixes reverted by package updates | handled | [`patch/auto-rebuild/`](patch/auto-rebuild/) — pacman hooks that rebuild them |
-| Caps Lock LED | dark | collateral of `i8042.dumbkbd=1`, see [Known limitations](#known-limitations) |
+| Caps Lock LED | dark | collateral of `i8042.dumbkbd=1`; an upstream `atkbd` quirk removes both, see [`patch/keyboard-atkbd/`](patch/keyboard-atkbd/) |
 | Fn+F7 mic-mute key itself | works out of the box | in-tree `huawei-wmi`, nothing to install |
 
 Speakers, headphone output, the built-in DMIC array, webcam, Wi-Fi and
@@ -158,7 +158,7 @@ Details and the manual fallback are in
 
 | Limitation | Cause |
 |---|---|
-| **Caps Lock LED stays dark** | `i8042.dumbkbd=1`, needed for the internal keyboard, also disables atkbd's `SET_LEDS` path. Details and an experiment to try below |
+| **Caps Lock LED stays dark** | `i8042.dumbkbd=1`, needed for the internal keyboard, also disables atkbd's `SET_LEDS` path, so the keyboard comes up without `EV_LED`. An upstream `atkbd` DMI quirk fixes the keyboard without the parameter and brings the LED back; verified on this unit, waiting to be merged. See [`patch/keyboard-atkbd/`](patch/keyboard-atkbd/) |
 | **Fan control is not possible** | the EC owns the fan curve. `SFNS` is gated on an `MFGM` flag no AML path ever sets, and the DPTF `TFN1` cooling device accepts writes that the EC ignores. Both tested, see [`patch/fan/README.md`](patch/fan/README.md) |
 | **Mic-mute LED follows the built-in array only** | the kernel's control-LED group tracks `Dmic0 Capture Switch` and lights the LED only when *every* attached control is muted. Mute the 3.5 mm jack input while it is not the default and the LED does not move. The built-in array is the default, so Fn+F7 works normally. See [`patch/headset-mic/README.md`](patch/headset-mic/README.md) |
 | **MIPI / IPU6 cameras unconfigured** | no sensor on this SKU |
@@ -313,6 +313,9 @@ HONOR_ZQC-P_M1010/
 │   │   ├── SSDT27_TPD0.aml         #   ready-to-install ACPI override (binary)
 │   │   ├── SSDT27_TPD0.dsl         #   human-readable source
 │   │   └── acpi_override.install   #   mkinitcpio install hook (early CPIO)
+│   ├── keyboard-atkbd/             # upstream quirk, reference only, needs a kernel rebuild
+│   │   ├── 0001-Input-atkbd-skip-deactivate-for-HONOR-ZQC-P.patch
+│   │   └── README.md
 │   ├── auto-rebuild/               # pacman hooks: keep fixes applied across updates
 │   │   ├── rebuild.sh              #   dispatcher, installed to /usr/local/lib/honor-zqcp/
 │   │   ├── 95-honor-zqcp-kernel-modules.hook

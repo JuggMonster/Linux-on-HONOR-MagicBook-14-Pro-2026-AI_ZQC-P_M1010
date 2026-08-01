@@ -1,0 +1,42 @@
+From: Donglin Lyu <DongLin_Lyu@outlook.com>
+Subject: [PATCH v2] Input: atkbd - skip deactivate for HONOR ZQC-P
+Message-Id: <20260801151115.52709-1-donglin_lyu@outlook.com>
+Link: https://patchwork.kernel.org/project/linux-input/patch/20260801151115.52709-1-donglin_lyu@outlook.com/
+
+The internal keyboard on the HONOR ZQC-P (HONOR MagicBook Pro 14 2026) 
+does not work after boot.
+
+Using the kernel command line 'i8042.dumbkbd=1' makes the keyboard 
+functional, but the CapsLock LED does not work. Adding the 
+'atkbd_deactivate_fixup' quirk fixes the keyboard and CapsLock LED
+natively without requiring boot parameters.
+
+DMI: HONOR ZQC-P/ZQC-P-PCB, BIOS 1.09 03/19/2026
+
+Fixes: 9cf6e24c9fbf ("Input: atkbd - do not skip atkbd_deactivate() when skipping ATKBD_CMD_GETID")
+Signed-off-by: Donglin Lyu <donglin_lyu@outlook.com>
+---
+v2: Correct From header (previously overwritten by mail provider)
+
+ drivers/input/keyboard/atkbd.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/drivers/input/keyboard/atkbd.c b/drivers/input/keyboard/atkbd.c
+index 8cb4dc6fb..4a7e91290 100644
+--- a/drivers/input/keyboard/atkbd.c
++++ b/drivers/input/keyboard/atkbd.c
+@@ -1938,6 +1938,14 @@ static const struct dmi_system_id atkbd_dmi_quirk_table[] __initconst = {
+ 		},
+ 		.callback = atkbd_deactivate_fixup,
+ 	},
++	{
++		/* HONOR MagicBook Pro 14 2026 */
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "HONOR"),
++			DMI_MATCH(DMI_PRODUCT_NAME, "ZQC-P"),
++		},
++		.callback = atkbd_deactivate_fixup,
++	},
+ 	{ }
+ };
+
