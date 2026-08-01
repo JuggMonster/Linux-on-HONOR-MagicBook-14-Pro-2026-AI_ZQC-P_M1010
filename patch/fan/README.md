@@ -90,6 +90,44 @@ offset of 25 held the package at 71-73 °C instead of climbing toward 97 °C.
 That is not better cooling, though: it throttles the CPU earlier. The value
 resets to 3 on every boot.
 
+### Why Windows behaves differently
+
+HONOR PC Manager runs a userspace loop that polls temperatures every ~200 ms
+and writes EC fields (`SVRF` / `SPPM`) to widen the thermal envelope, so the EC
+starts spinning the fans much earlier, around 55 °C. Nothing equivalent exists
+in mainline `huawei-wmi`, so the EC keeps its conservative default profile.
+Under Linux the machine is quieter and throttles earlier.
+
+Intel RAPL package power is firmware-capped at **50 W**, not the 88 W the
+`intel_rapl` constraints advertise. The cap is enforced by the EC through the
+`VCCC` register, not by RAPL. Per-core clocks under sustained load settle
+around 3.3 GHz.
+
+## EC register map
+
+Source of truth: `win11_dump/OEM/SSDT21.dsl` (method `WMAA`) and
+`win11_dump/OEM/DSDT.dsl` (the EC `OperationRegion` definitions).
+
+| Field | Region | Offset | Meaning |
+|---|---|---|---|
+| `FA0L`+`FA0R` / `FA1L`+`FA1R` | ECF0 @ `0xFE0B0000` | `0x2C-0x2D` / `0x2E-0x2F` | per-fan tachometer, 16-bit little-endian RPM, read-only |
+| `MFGM` | ECF0 | `0x0F` bit 0 | master manual-fan enable. Not writable from ASL, only the EC sets it |
+| `F0EN` / `F1EN` | ECF5 @ `0xFE0B0500` | `0x3A` | per-fan enable bits, read-only from AML |
+| `F0PD` / `F1PD` | ECF5 | `0x3B` / `0x3C` | per-fan PWM duty. Written by `SFNS`, but only when `MFGM == 1` |
+| `FWMD` | ECF5 | `0x31` | fan working mode. Written by `SFNM`, ungated, but has no effect while `MFGM == 0` |
+| `SCPM` | ECF5 | `0x32` | system CPU performance mode. Written by `SPPM`; accepts 0-3 with no observable effect on PL1 or clocks |
+| `VCCC` / `VCCG` / `VCCS` / `VCCL` | ECF6 @ `0xFE0B0600` | `0x20-0x23` | per-rail power limits, 1..51 W, `0xFF` unlocks. Written by `SVRF` |
+| `PPL4` | ECF6 | `0x24` | power limit 4, peak. Written by `SVRF` |
+
+`ECF0`, the first 256 bytes of EC RAM, is reachable through the standard ACPI
+EC interface: `sudo modprobe ec_sys`, then read `/sys/kernel/debug/ec/ec0/io`.
+`ECF5` / `ECF6` / `ECF7` are extended banks that interface cannot see; they need
+`/dev/mem` mmap or an ACPI method call through `acpi_call`.
+
+The one remaining lever nobody has pulled is indirect: a daemon that polls
+temperatures and lowers `VCCC` through `SVRF` (MFID `0x07`, SFID `0x0F`) so the
+EC decides to cool harder. Unwritten.
+
 ## Note on an earlier misreading
 
 Older revisions of this repo described `FA0L`/`FA1L` as "PWM duty 0..255" and

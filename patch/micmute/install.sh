@@ -1,25 +1,12 @@
 #!/usr/bin/env bash
-# install.sh — stop the phantom KEY_MICMUTE device created from the
-# touchscreen's vendor-defined HID collection.
+# Build and install the HID-BPF fixup that removes the phantom KEY_MICMUTE
+# device created from the FocalTech FTSC1000 touchscreen's vendor collection.
 #
-# Root cause (measured on this machine, see README.md):
-#   The FocalTech FTSC1000 touchscreen (I2C HID 2808:5662) declares a
-#   vendor-defined application collection on HID usage page 0xff01. That page
-#   is HID_UP_HPVENDOR2 in the kernel, so hid-input maps usage 0xff010001 to
-#   KEY_MICMUTE. The device matches MT_CLS_WIN_8, which sets export_all_inputs,
-#   so hid-multitouch exports the collection as a second input device whose
-#   only key is KEY_MICMUTE. Its 59 data bytes all carry that usage, and
-#   hid-input sets EV_REP for the page, so a single vendor report leaves
-#   KEY_MICMUTE held down and auto-repeating at ~30 Hz until reboot.
+# See README.md in this directory for the root cause.
 #
-#   That is the microphone muting and unmuting on its own.
-#
-# The fix rebuilds hid-multitouch.ko with one extra guard: never export a
-# vendor-defined application collection. The touchscreen and the touchpad keep
-# working, and the real Fn+F7 key is untouched — it arrives over WMI on the
-# "Huawei WMI hotkeys" input device, not over HID.
-#
-# Reruns are safe. Re-run after every kernel update.
+# Reruns are safe. Nothing here has to be repeated after a kernel update:
+# the BPF object is CO-RE and libbpf relocates it against the running
+# kernel's BTF.
 
 set -euo pipefail
 
@@ -28,188 +15,103 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-# Override with KVER=... to build for a kernel other than the running one -
-# needed when a kernel update is installed but not yet booted, since the
-# headers for the running kernel are gone at that point.
-KVER="${KVER:-$(uname -r)}"
-BUILD_DIR="/usr/lib/modules/${KVER}/build"
-UPDATES_DIR="/usr/lib/modules/${KVER}/updates"
-KO_NAME="hid-multitouch.ko.zst"
-KO_OVERLAY="${UPDATES_DIR}/${KO_NAME}"
-KO_INTREE="/usr/lib/modules/${KVER}/kernel/drivers/hid/${KO_NAME}"
-BACKUP="/root/${KO_NAME}.orig"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_FILE="${SCRIPT_DIR}/0001-HID-multitouch-do-not-export-vendor-defined-applicat.patch"
-RULES_FILE="${SCRIPT_DIR}/99-honor-phantom-micmute.rules"
-WORK=$(mktemp -d /var/tmp/hid-micmute-XXXXXX)
+SRC="${SCRIPT_DIR}/honor-ftsc1000-micmute.bpf.c"
+OBJ_NAME="honor-ftsc1000-micmute.bpf.o"
+INSTALL_DIR="/etc/udev-hid-bpf"
+RULES_FILE="/etc/udev/rules.d/99-hid-bpf-honor-ftsc1000-micmute.rules"
+KVER="$(uname -r)"
+TAG="v${KVER%%-*}"
+BASE_URL="https://raw.githubusercontent.com/gregkh/linux/${TAG}/drivers/hid/bpf/progs"
+WORK=$(mktemp -d /var/tmp/honor-hidbpf-XXXXXX)
 
-cleanup() { rm -rf "$WORK"; }
-trap cleanup EXIT
+trap 'rm -rf "$WORK"' EXIT
 
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; exit 1; }
 
-req() { command -v "$1" >/dev/null || die "missing required tool: $1"; }
-for t in curl make clang ld.lld patch depmod modinfo zstd; do req "$t"; done
+# --- 1. prerequisites ---------------------------------------------------------
+[[ -f "$SRC" ]] || die "source not found: $SRC"
 
-log "kernel = ${KVER}"
-log "target = ${KO_OVERLAY}"
-
-[[ -f "$PATCH_FILE" ]] || die "patch file not found: $PATCH_FILE"
-
-# --- 0. is the phantom device even present? -----------------------------------
-# Purely informational when building for another kernel.
-PHANTOM=""
-for d in /sys/class/input/input*; do
-    [[ "$(cat "$d/name" 2>/dev/null)" == *"2808:5662"*UNKNOWN* ]] || continue
-    PHANTOM="$d"
+for t in clang bpftool curl udev-hid-bpf udevadm; do
+    command -v "$t" >/dev/null || die "missing required tool: $t
+    Arch/CachyOS: pacman -S clang bpf udev-hid-bpf"
 done
-if [[ -n "$PHANTOM" ]]; then
-    log "phantom device present: $(cat "$PHANTOM/name")"
-elif [[ "$KVER" == "$(uname -r)" ]]; then
-    warn "No '2808:5662 ... UNKNOWN' input device on this system."
-    warn "Either the fix is already active, or this machine has a different"
-    warn "touchscreen. Continuing anyway - the patch is a no-op if so."
-fi
 
-# --- 1. refuse if unsigned modules cannot load --------------------------------
-if [[ -r /sys/kernel/security/lockdown ]] \
-   && grep -qE '\[(integrity|confidentiality)\]' /sys/kernel/security/lockdown; then
-    die "kernel lockdown is active - unsigned modules will not load.
-    $(cat /sys/kernel/security/lockdown)
-    Use the udev fallback instead: install ${RULES_FILE##*/} into /etc/udev/rules.d/"
-fi
-if grep -qE '\bmodule\.sig_enforce=1\b' /proc/cmdline; then
-    die "module.sig_enforce=1 in /proc/cmdline - unsigned modules will not load."
-fi
+grep -q "^CONFIG_HID_BPF=y" <(zcat /proc/config.gz 2>/dev/null) \
+    || warn "CONFIG_HID_BPF=y not confirmed in /proc/config.gz - continuing anyway."
 
-[[ -f "${BUILD_DIR}/Makefile" && -f "${BUILD_DIR}/Module.symvers" ]] \
-    || die "kernel build dir incomplete: ${BUILD_DIR}
-    install the matching linux-*-headers package and re-run."
+[[ -r /sys/kernel/btf/vmlinux ]] \
+    || die "/sys/kernel/btf/vmlinux missing - the kernel needs CONFIG_DEBUG_INFO_BTF=y."
 
-# --- 2. fetch matching sources ------------------------------------------------
-TAG="v${KVER%%-*}"
-BASE_URL="https://raw.githubusercontent.com/gregkh/linux/${TAG}"
+log "kernel  = ${KVER}"
+log "headers = ${TAG}"
 
-fetch() {
-    local rel="$1" dest="$2" code
-    code=$(curl -sSL --max-time 60 -o "$dest" -w '%{http_code}' "${BASE_URL}/${rel}")
-    [[ "$code" == "200" ]] || die "fetch failed: ${BASE_URL}/${rel} (HTTP $code)"
-}
+# --- 2. fetch the kernel's BPF prog headers -----------------------------------
+for h in hid_bpf.h hid_bpf_helpers.h hid_report_descriptor_helpers.h; do
+    code=$(curl -sSL --max-time 60 -o "${WORK}/${h}" -w '%{http_code}' "${BASE_URL}/${h}")
+    [[ "$code" == "200" ]] || die "fetch failed: ${BASE_URL}/${h} (HTTP $code)"
+done
+bpftool btf dump file /sys/kernel/btf/vmlinux format c > "${WORK}/vmlinux.h"
 
-log "fetching drivers/hid sources at tag ${TAG}"
-fetch "drivers/hid/hid-multitouch.c" "${WORK}/hid-multitouch.c"
-# hid-ids.h and hid-haptic.h live in drivers/hid/ and are not shipped in the
-# headers package, so they have to come from the tree as well.
-fetch "drivers/hid/hid-ids.h"        "${WORK}/hid-ids.h"
-fetch "drivers/hid/hid-haptic.h"     "${WORK}/hid-haptic.h"
+# --- 3. build -----------------------------------------------------------------
+log "building ${OBJ_NAME}"
+cp "$SRC" "${WORK}/"
+clang -O2 -g -target bpf -mcpu=v3 -D__TARGET_ARCH_x86 \
+      -I"$WORK" -Wno-missing-declarations \
+      -c "${WORK}/$(basename "$SRC")" -o "${WORK}/${OBJ_NAME}" 2>&1 \
+    | grep -vE "does not declare anything|^ *[0-9]+ \||^ +\^|In file included from|warnings? generated" \
+    || true
+[[ -f "${WORK}/${OBJ_NAME}" ]] || die "build produced no object"
 
-# Already merged upstream? Then the overlay is redundant.
-if grep -qF 'Vendor-defined application collections carry raw firmware' \
-        "${WORK}/hid-multitouch.c"; then
-    log "in-tree hid-multitouch.c at ${TAG} already contains the fix."
-    if [[ -f "$KO_OVERLAY" ]]; then
-        log "removing redundant overlay $KO_OVERLAY"
-        rm -f "$KO_OVERLAY"
-        rmdir --ignore-fail-on-non-empty "$UPDATES_DIR" 2>/dev/null || true
-        depmod -a "$KVER"
-    fi
-    exit 0
-fi
-
-# Skip the rebuild if our overlay is already in place.
-if [[ -f "$KO_OVERLAY" ]]; then
-    sv_o=$(modinfo -F srcversion "$KO_OVERLAY" 2>/dev/null || true)
-    sv_i=$(modinfo -F srcversion "$KO_INTREE"  2>/dev/null || true)
-    if [[ -n "$sv_o" && "$sv_o" != "$sv_i" ]]; then
-        log "overlay already present with a srcversion different from the"
-        log "in-tree module - assumed patched. Delete it and re-run to rebuild."
-        exit 0
-    fi
-fi
-
-# --- 3. patch and build -------------------------------------------------------
-log "applying ${PATCH_FILE##*/}"
-patch -p3 --no-backup-if-mismatch -d "$WORK" < "$PATCH_FILE" \
-    || die "patch did not apply against ${TAG} - upstream layout drifted.
-    Review .rej files in $WORK"
-
-cat > "${WORK}/Makefile" <<EOF
-obj-m += hid-multitouch.o
-KDIR := ${BUILD_DIR}
-PWD  := \$(shell pwd)
-default:
-	\$(MAKE) -C \$(KDIR) M=\$(PWD) LLVM=1 LLVM_IAS=1 modules
-EOF
-
-log "building hid-multitouch.ko (LLVM toolchain)"
-( cd "$WORK" && make ) 2>&1 | tail -6
-
-BUILT="${WORK}/hid-multitouch.ko"
-[[ -f "$BUILT" ]] || die "build did not produce ${BUILT}"
-
-SV_BUILT=$( modinfo -F srcversion "$BUILT"     2>/dev/null || true)
-SV_INTREE=$(modinfo -F srcversion "$KO_INTREE" 2>/dev/null || true)
-[[ -z "$SV_INTREE" || "$SV_BUILT" != "$SV_INTREE" ]] \
-    || die "built srcversion == in-tree srcversion (${SV_BUILT}) - the patch
-    produced identical output. Refusing to install an indistinguishable module."
+udev-hid-bpf inspect "${WORK}/${OBJ_NAME}" >/dev/null \
+    || die "udev-hid-bpf does not recognise the built object"
 
 # --- 4. install ---------------------------------------------------------------
-if [[ ! -f "$BACKUP" && -f "$KO_INTREE" ]]; then
-    log "backing up ${KO_INTREE} -> ${BACKUP}"
-    cp -a "$KO_INTREE" "$BACKUP"
-fi
+log "installing to ${INSTALL_DIR}/${OBJ_NAME}"
+udev-hid-bpf install --force "${WORK}/${OBJ_NAME}" >/dev/null
+udevadm control --reload
 
-log "installing to ${KO_OVERLAY}"
-install -d -m 0755 "$UPDATES_DIR"
-zstd -19 -q --force "$BUILT" -o "${WORK}/${KO_NAME}"
-install -m 0644 "${WORK}/${KO_NAME}" "$KO_OVERLAY"
-depmod -a "$KVER"
+# --- 5. apply to the live device and verify -----------------------------------
+DEV=""
+for d in /sys/bus/hid/devices/*2808:5662*; do [[ -e "$d" ]] && DEV="$d"; done
 
-RESOLVED=$(readlink -f "$(modinfo -F filename hid_multitouch 2>/dev/null)" 2>/dev/null || true)
-if [[ "$RESOLVED" != "$(readlink -f "$KO_OVERLAY")" ]]; then
-    warn "modinfo resolves hid_multitouch to $RESOLVED, expected $KO_OVERLAY."
-    warn "depmod ordering may need investigation."
-fi
-
-# --- 5. activate --------------------------------------------------------------
-if [[ "$KVER" != "$(uname -r)" ]]; then
-    log "Built for $KVER, not the running kernel. It becomes active on reboot."
+if [[ -z "$DEV" ]]; then
+    warn "No 2808:5662 HID device present. The fixup is installed and will be"
+    warn "applied when the device appears."
     exit 0
 fi
 
-log "reloading hid_multitouch (touchpad and touchscreen re-enumerate)"
-if modprobe -r hid_multitouch 2>/dev/null && modprobe hid_multitouch; then
-    LEFT=""
-    for d in /sys/class/input/input*; do
-        [[ "$(cat "$d/name" 2>/dev/null)" == *"2808:5662"*UNKNOWN* ]] && LEFT="$d"
-    done
-    if [[ -n "$LEFT" ]]; then
-        die "phantom device is still present after the reload: $(cat "$LEFT/name")"
-    fi
-    log "phantom KEY_MICMUTE device is gone."
-else
-    warn "Could not reload the module now (device busy?). It will take effect"
-    warn "on the next reboot."
-fi
+log "applying to ${DEV##*/}"
+udevadm trigger --action=add --subsystem-match=hid "$DEV"
+udevadm settle
+sleep 1
+
+PHANTOM=""
+for d in /sys/class/input/input*; do
+    [[ "$(cat "$d/name" 2>/dev/null)" == *"2808:5662"*UNKNOWN* ]] && PHANTOM="$d"
+done
+[[ -z "$PHANTOM" ]] || die "phantom device is still present: $(cat "$PHANTOM/name")"
+
+log "phantom KEY_MICMUTE device is gone."
 
 cat <<EOF
 
 ════════════════════════════════════════════════════════════════════
-  Phantom KEY_MICMUTE device removed.
+  Installed.
 
-  Overlay: $KO_OVERLAY
-  Backup of the in-tree module: $BACKUP
-  (delete the overlay and re-run depmod -a to revert.)
+  BPF object : ${INSTALL_DIR}/${OBJ_NAME}
+  udev rule  : ${RULES_FILE}
 
-  Verify - this should print nothing:
-    grep -l UNKNOWN /sys/class/input/input*/name | xargs -r grep -H 2808
+  Nothing to redo after a kernel update.
 
-  Verify the real key still works - "Huawei WMI hotkeys" must still list
-  event code 248 (KEY_MICMUTE), and Fn+F7 must still toggle the mic:
-    sudo evtest /dev/input/by-path/platform-huawei-wmi-event
+  Uninstall:
+      sudo rm ${INSTALL_DIR}/${OBJ_NAME} ${RULES_FILE}
+      sudo udevadm control --reload
+      reboot
 
-  Re-run this script after every kernel update.
+  Verify (must print nothing):
+      grep -l UNKNOWN /sys/class/input/input*/name | xargs -r grep -H 2808
 ════════════════════════════════════════════════════════════════════
 EOF

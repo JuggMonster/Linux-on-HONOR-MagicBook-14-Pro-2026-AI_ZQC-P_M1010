@@ -58,18 +58,17 @@ else
 fi
 [[ -f "$SOF_BACKUP" ]] && echo "    in-tree backup at $SOF_BACKUP retained for next install."
 
-echo "[6/7] Remove module overlays for the mic-mute fixes (if present)"
+echo "[6/7] Remove the HID-BPF mic-mute fixup and any legacy module overlays"
+rm -fv /etc/udev-hid-bpf/honor-ftsc1000-micmute.bpf.o \
+       /etc/udev/rules.d/99-hid-bpf-honor-ftsc1000-micmute.rules
+udevadm control --reload 2>/dev/null || true
 for pair in \
     "/usr/lib/modules/${KVER}/updates/hid-multitouch.ko.zst:/root/hid-multitouch.ko.zst.orig" \
     "/usr/lib/modules/${KVER}/updates/huawei-wmi.ko.zst:/root/huawei-wmi.ko.zst.orig"
 do
     OVERLAY="${pair%%:*}"; BACKUP="${pair##*:}"
-    if [[ -f "$OVERLAY" ]]; then
-        rm -fv "$OVERLAY"
-    else
-        echo "    no overlay at $OVERLAY — already absent."
-    fi
-    [[ -f "$BACKUP" ]] && echo "    in-tree backup at $BACKUP retained for next install."
+    [[ -f "$OVERLAY" ]] && rm -fv "$OVERLAY"
+    [[ -f "$BACKUP" ]] && echo "    in-tree backup at $BACKUP retained."
 done
 
 rmdir --ignore-fail-on-non-empty "/usr/lib/modules/${KVER}/updates" 2>/dev/null || true
@@ -88,6 +87,5 @@ echo "again until apply_patch.sh is re-run or a different fix is installed."
 echo "Analog 3.5mm-jack headset mic input will also disappear."
 echo "SOF DSP will fall back to the in-tree (unpatched) module — expect"
 echo "occasional DSP panics on suspend/resume per thesofproject/sof#10700."
-echo "hid-multitouch will fall back to the in-tree (unpatched) module — the"
-echo "touchscreen's vendor HID collection will be exported as a phantom"
+echo "The touchscreen's vendor HID collection will be exported as a phantom"
 echo "KEY_MICMUTE device again, so the mic will start muting itself."
