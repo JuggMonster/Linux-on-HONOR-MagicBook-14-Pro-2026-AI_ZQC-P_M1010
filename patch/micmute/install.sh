@@ -1,47 +1,25 @@
 #!/usr/bin/env bash
-# install-huawei-wmi-fix.sh — fetch the running kernel's huawei-wmi.c
-# from the upstream stable tree, apply our KEY_MICMUTE storm-detection
-# patch, build huawei-wmi.ko out-of-tree against the installed kernel
-# headers, and drop the resulting huawei-wmi.ko.zst into the modules
-# updates/ overlay so it loads instead of the unpatched in-tree module.
+# install.sh — stop the phantom KEY_MICMUTE device created from the
+# touchscreen's vendor-defined HID collection.
 #
-# Background:
-#   The HONOR ZQC-P M1010 EC firmware fires the mic-privacy WMI event
-#   (0x287, KEY_MICMUTE) autonomously in 2-event pairs, separated by
-#   anywhere from 0.5 to 5 seconds, with no user keypress. The trigger
-#   is opaque firmware logic — not exposed via any documented ACPI/WMI
-#   setter — and includes touchpad swipes that change focus to audio-
-#   playing windows, intel_lpmd platform-profile transitions, and pure
-#   idle. The EC also writes the legacy PS/2 scancode 0xf8 to i8042 in
-#   parallel ("atkbd serio0: Unknown key pressed (translated set 2,
-#   code 0xf8 on isa0060/serio0)" in dmesg) — easy forensic marker.
+# Root cause (measured on this machine, see README.md):
+#   The FocalTech FTSC1000 touchscreen (I2C HID 2808:5662) declares a
+#   vendor-defined application collection on HID usage page 0xff01. That page
+#   is HID_UP_HPVENDOR2 in the kernel, so hid-input maps usage 0xff010001 to
+#   KEY_MICMUTE. The device matches MT_CLS_WIN_8, which sets export_all_inputs,
+#   so hid-multitouch exports the collection as a second input device whose
+#   only key is KEY_MICMUTE. Its 59 data bytes all carry that usage, and
+#   hid-input sets EV_REP for the page, so a single vendor report leaves
+#   KEY_MICMUTE held down and auto-repeating at ~30 Hz until reboot.
 #
-#   Each pair toggles the default source mute twice, which should self-
-#   cancel; but in practice the userspace dispatch path (Wayland
-#   compositor + gsd-media-keys grab + audio backend) loses one of the
-#   two toggles to races, leaving the mic stuck muted with the
-#   platform::micmute LED on and the hardware Fn+F7 shortcut unable to
-#   restore it. Manual unmute through the GNOME tray or pavucontrol
-#   recovers; nothing else does.
+#   That is the microphone muting and unmuting on its own.
 #
-#   The patch adds storm-detection in huawei_wmi_process_key(): when
-#   a 0x287 event arrives, the driver defers emission by a configurable
-#   number of milliseconds (micmute_storm_window_ms, default 2000);
-#   if a second 0x287 arrives during the window both are dropped
-#   (storm pair); otherwise the deferred event is emitted normally
-#   (legitimate single Fn+F7 press). Trade-off: <=1 s emit latency on
-#   legitimate Fn+F7 press in exchange for full silencing of the EC
-#   storm. Set micmute_storm_window_ms=0 to disable the filter.
+# The fix rebuilds hid-multitouch.ko with one extra guard: never export a
+# vendor-defined application collection. The touchscreen and the touchpad keep
+# working, and the real Fn+F7 key is untouched — it arrives over WMI on the
+# "Huawei WMI hotkeys" input device, not over HID.
 #
-# This is a workaround for as long as the upstream patch under
-# patch/micmute/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch
-# has not yet landed in the kernel being used. Once the change is in
-# the running kernel's huawei-wmi.c this script becomes a no-op (it
-# will detect the existing edit and skip the rebuild, removing any
-# stale overlay).
-#
-# Reruns are safe — running it after a kernel update will rebuild
-# against the new headers automatically.
+# Reruns are safe. Re-run after every kernel update.
 
 set -euo pipefail
 
@@ -56,82 +34,83 @@ fi
 KVER="${KVER:-$(uname -r)}"
 BUILD_DIR="/usr/lib/modules/${KVER}/build"
 UPDATES_DIR="/usr/lib/modules/${KVER}/updates"
-KO_NAME="huawei-wmi.ko.zst"
+KO_NAME="hid-multitouch.ko.zst"
 KO_OVERLAY="${UPDATES_DIR}/${KO_NAME}"
-KO_INTREE="/usr/lib/modules/${KVER}/kernel/drivers/platform/x86/${KO_NAME}"
+KO_INTREE="/usr/lib/modules/${KVER}/kernel/drivers/hid/${KO_NAME}"
 BACKUP="/root/${KO_NAME}.orig"
-WORK=$(mktemp -d /tmp/huawei-wmi-fix-XXXXXX)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_FILE="${SCRIPT_DIR}/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch"
+PATCH_FILE="${SCRIPT_DIR}/0001-HID-multitouch-do-not-export-vendor-defined-applicat.patch"
+RULES_FILE="${SCRIPT_DIR}/99-honor-phantom-micmute.rules"
+WORK=$(mktemp -d /var/tmp/hid-micmute-XXXXXX)
 
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
-req() { command -v "$1" >/dev/null || { echo "missing required tool: $1" >&2; exit 1; }; }
-req curl
-req zstdcat
-req zstd
-req make
-req clang
-req ld.lld
-req patch
-req depmod
-req modinfo
+log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; exit 1; }
 
-echo "[*] kernel  = ${KVER}"
-echo "[*] target  = ${KO_OVERLAY}"
-echo "[*] patch   = ${PATCH_FILE}"
+req() { command -v "$1" >/dev/null || die "missing required tool: $1"; }
+for t in curl make clang ld.lld patch depmod modinfo zstd; do req "$t"; done
 
-if [[ ! -f "$PATCH_FILE" ]]; then
-    echo "[fatal] patch file not found: $PATCH_FILE" >&2
-    exit 1
+log "kernel = ${KVER}"
+log "target = ${KO_OVERLAY}"
+
+[[ -f "$PATCH_FILE" ]] || die "patch file not found: $PATCH_FILE"
+
+# --- 0. is the phantom device even present? -----------------------------------
+# Purely informational when building for another kernel.
+PHANTOM=""
+for d in /sys/class/input/input*; do
+    [[ "$(cat "$d/name" 2>/dev/null)" == *"2808:5662"*UNKNOWN* ]] || continue
+    PHANTOM="$d"
+done
+if [[ -n "$PHANTOM" ]]; then
+    log "phantom device present: $(cat "$PHANTOM/name")"
+elif [[ "$KVER" == "$(uname -r)" ]]; then
+    warn "No '2808:5662 ... UNKNOWN' input device on this system."
+    warn "Either the fix is already active, or this machine has a different"
+    warn "touchscreen. Continuing anyway - the patch is a no-op if so."
 fi
 
-# Refuse to run if module signature enforcement is on — our rebuilt module
-# would not be loadable.
+# --- 1. refuse if unsigned modules cannot load --------------------------------
 if [[ -r /sys/kernel/security/lockdown ]] \
    && grep -qE '\[(integrity|confidentiality)\]' /sys/kernel/security/lockdown; then
-    echo "[fatal] kernel lockdown is active — unsigned modules won't load." >&2
-    echo "        $(cat /sys/kernel/security/lockdown)" >&2
-    exit 1
+    die "kernel lockdown is active - unsigned modules will not load.
+    $(cat /sys/kernel/security/lockdown)
+    Use the udev fallback instead: install ${RULES_FILE##*/} into /etc/udev/rules.d/"
 fi
 if grep -qE '\bmodule\.sig_enforce=1\b' /proc/cmdline; then
-    echo "[fatal] module.sig_enforce=1 in /proc/cmdline — unsigned modules won't load." >&2
-    exit 1
+    die "module.sig_enforce=1 in /proc/cmdline - unsigned modules will not load."
 fi
 
-# Verify build infrastructure.
-if [[ ! -f "${BUILD_DIR}/Makefile" || ! -f "${BUILD_DIR}/Module.symvers" ]]; then
-    echo "[fatal] kernel build dir incomplete: ${BUILD_DIR}" >&2
-    echo "        install the matching linux-*-headers package and re-run."
-    exit 1
-fi
+[[ -f "${BUILD_DIR}/Makefile" && -f "${BUILD_DIR}/Module.symvers" ]] \
+    || die "kernel build dir incomplete: ${BUILD_DIR}
+    install the matching linux-*-headers package and re-run."
 
-# Fetch upstream huawei-wmi.c at the running kernel's tag.
+# --- 2. fetch matching sources ------------------------------------------------
 TAG="v${KVER%%-*}"
 BASE_URL="https://raw.githubusercontent.com/gregkh/linux/${TAG}"
 
 fetch() {
-    local rel="$1" dest="$2"
-    local code
-    mkdir -p "$(dirname "$dest")"
+    local rel="$1" dest="$2" code
     code=$(curl -sSL --max-time 60 -o "$dest" -w '%{http_code}' "${BASE_URL}/${rel}")
-    if [[ "$code" != "200" ]]; then
-        echo "[fatal] fetch failed: ${BASE_URL}/${rel} (HTTP $code)" >&2
-        exit 1
-    fi
+    [[ "$code" == "200" ]] || die "fetch failed: ${BASE_URL}/${rel} (HTTP $code)"
 }
 
-# Detect whether the running kernel already has the storm-detection
-# patch merged. We look for the distinctive parameter name in the
-# upstream huawei-wmi.c; if present, the fix is in-tree and we
-# remove any prior overlay as redundant.
-echo "[*] checking upstream ${TAG} for whether the fix is already merged"
-fetch "drivers/platform/x86/huawei-wmi.c" "${WORK}/_check_huawei-wmi.c"
-if grep -qF 'micmute_storm_window_ms' "${WORK}/_check_huawei-wmi.c"; then
-    echo "[ok] in-tree huawei-wmi.c at ${TAG} already contains the fix."
+log "fetching drivers/hid sources at tag ${TAG}"
+fetch "drivers/hid/hid-multitouch.c" "${WORK}/hid-multitouch.c"
+# hid-ids.h and hid-haptic.h live in drivers/hid/ and are not shipped in the
+# headers package, so they have to come from the tree as well.
+fetch "drivers/hid/hid-ids.h"        "${WORK}/hid-ids.h"
+fetch "drivers/hid/hid-haptic.h"     "${WORK}/hid-haptic.h"
+
+# Already merged upstream? Then the overlay is redundant.
+if grep -qF 'Vendor-defined application collections carry raw firmware' \
+        "${WORK}/hid-multitouch.c"; then
+    log "in-tree hid-multitouch.c at ${TAG} already contains the fix."
     if [[ -f "$KO_OVERLAY" ]]; then
-        echo "[*] removing redundant overlay $KO_OVERLAY"
+        log "removing redundant overlay $KO_OVERLAY"
         rm -f "$KO_OVERLAY"
         rmdir --ignore-fail-on-non-empty "$UPDATES_DIR" 2>/dev/null || true
         depmod -a "$KVER"
@@ -139,115 +118,97 @@ if grep -qF 'micmute_storm_window_ms' "${WORK}/_check_huawei-wmi.c"; then
     exit 0
 fi
 
-# Skip rebuild if our overlay is already in place with a srcversion
-# distinct from the in-tree baseline.
-overlay_is_patched() {
-    [[ -f "$KO_OVERLAY" ]] || return 1
-    local sv_overlay sv_intree
-    sv_overlay=$(modinfo -F srcversion "$KO_OVERLAY" 2>/dev/null || true)
-    sv_intree=$( modinfo -F srcversion "$KO_INTREE"  2>/dev/null || true)
-    [[ -n "$sv_overlay" && "$sv_overlay" != "$sv_intree" ]]
-}
-if overlay_is_patched; then
-    echo "[ok] overlay already present at $KO_OVERLAY with a different srcversion"
-    echo "     than the in-tree module — assumed to be the patched build."
-    echo "     Delete the overlay file and re-run if you want a fresh rebuild."
-    exit 0
+# Skip the rebuild if our overlay is already in place.
+if [[ -f "$KO_OVERLAY" ]]; then
+    sv_o=$(modinfo -F srcversion "$KO_OVERLAY" 2>/dev/null || true)
+    sv_i=$(modinfo -F srcversion "$KO_INTREE"  2>/dev/null || true)
+    if [[ -n "$sv_o" && "$sv_o" != "$sv_i" ]]; then
+        log "overlay already present with a srcversion different from the"
+        log "in-tree module - assumed patched. Delete it and re-run to rebuild."
+        exit 0
+    fi
 fi
 
-# Stage the patched source and a minimal Kbuild Makefile in $WORK.
-echo "[*] fetching huawei-wmi.c at tag ${TAG}"
-mv "${WORK}/_check_huawei-wmi.c" "${WORK}/huawei-wmi.c"
+# --- 3. patch and build -------------------------------------------------------
+log "applying ${PATCH_FILE##*/}"
+patch -p3 --no-backup-if-mismatch -d "$WORK" < "$PATCH_FILE" \
+    || die "patch did not apply against ${TAG} - upstream layout drifted.
+    Review .rej files in $WORK"
 
-echo "[*] applying ${PATCH_FILE##*/}"
-if ! patch -p4 --no-backup-if-mismatch -d "$WORK" < "$PATCH_FILE"; then
-    echo "[fatal] patch did not apply cleanly against ${TAG}'s huawei-wmi.c" >&2
-    echo "        upstream layout drifted — review .rej files in $WORK" >&2
-    exit 1
-fi
-
-# Minimal out-of-tree build Makefile. KDIR is baked in from $BUILD_DIR rather
-# than derived from `uname -r`, so a KVER override actually reaches the build.
 cat > "${WORK}/Makefile" <<EOF
-obj-m += huawei-wmi.o
+obj-m += hid-multitouch.o
 KDIR := ${BUILD_DIR}
 PWD  := \$(shell pwd)
 default:
 	\$(MAKE) -C \$(KDIR) M=\$(PWD) LLVM=1 LLVM_IAS=1 modules
-clean:
-	\$(MAKE) -C \$(KDIR) M=\$(PWD) clean
 EOF
 
-echo "[*] building huawei-wmi.ko (LLVM toolchain)"
-( cd "$WORK" && make ) 2>&1 | tail -8
+log "building hid-multitouch.ko (LLVM toolchain)"
+( cd "$WORK" && make ) 2>&1 | tail -6
 
-BUILT_KO="${WORK}/huawei-wmi.ko"
-if [[ ! -f "$BUILT_KO" ]]; then
-    echo "[fatal] build did not produce ${BUILT_KO}" >&2
-    exit 1
-fi
+BUILT="${WORK}/hid-multitouch.ko"
+[[ -f "$BUILT" ]] || die "build did not produce ${BUILT}"
 
-# Sanity-check that srcversion differs from in-tree baseline.
-SV_BUILT=$( modinfo -F srcversion "$BUILT_KO" 2>/dev/null || true)
+SV_BUILT=$( modinfo -F srcversion "$BUILT"     2>/dev/null || true)
 SV_INTREE=$(modinfo -F srcversion "$KO_INTREE" 2>/dev/null || true)
-if [[ -n "$SV_INTREE" && "$SV_BUILT" == "$SV_INTREE" ]]; then
-    echo "[fatal] built srcversion == in-tree srcversion (${SV_BUILT})" >&2
-    echo "        patch did not change the compiled output — bail out rather" >&2
-    echo "        than install an indistinguishable module." >&2
-    exit 1
-fi
+[[ -z "$SV_INTREE" || "$SV_BUILT" != "$SV_INTREE" ]] \
+    || die "built srcversion == in-tree srcversion (${SV_BUILT}) - the patch
+    produced identical output. Refusing to install an indistinguishable module."
 
-# Confirm the new module parameter is exported.
-if ! modinfo -F parm "$BUILT_KO" 2>/dev/null | grep -q 'micmute_storm_window_ms'; then
-    echo "[fatal] built module does not export micmute_storm_window_ms parameter" >&2
-    echo "        — patch did not take effect as expected." >&2
-    exit 1
-fi
-
+# --- 4. install ---------------------------------------------------------------
 if [[ ! -f "$BACKUP" && -f "$KO_INTREE" ]]; then
-    echo "[*] backing up in-tree ${KO_INTREE} -> ${BACKUP}"
+    log "backing up ${KO_INTREE} -> ${BACKUP}"
     cp -a "$KO_INTREE" "$BACKUP"
 fi
 
-echo "[*] installing patched module to ${KO_OVERLAY}"
+log "installing to ${KO_OVERLAY}"
 install -d -m 0755 "$UPDATES_DIR"
-zstd -19 -q --force "$BUILT_KO" -o "${WORK}/${KO_NAME}"
+zstd -19 -q --force "$BUILT" -o "${WORK}/${KO_NAME}"
 install -m 0644 "${WORK}/${KO_NAME}" "$KO_OVERLAY"
 depmod -a "$KVER"
 
-# Verify resolution. modinfo may report /lib/... where we wrote /usr/lib/...;
-# resolve both via readlink to compare canonical paths.
-RESOLVED=$(modinfo -F filename huawei_wmi 2>/dev/null || true)
-RESOLVED_REAL=$(readlink -f "$RESOLVED" 2>/dev/null || echo "$RESOLVED")
-EXPECTED_REAL=$(readlink -f "$KO_OVERLAY" 2>/dev/null || echo "$KO_OVERLAY")
-if [[ "$RESOLVED_REAL" != "$EXPECTED_REAL" ]]; then
-    echo "[warn] modinfo resolves huawei_wmi to:"
-    echo "       $RESOLVED"
-    echo "       (expected $KO_OVERLAY). depmod ordering may need investigation."
+RESOLVED=$(readlink -f "$(modinfo -F filename hid_multitouch 2>/dev/null)" 2>/dev/null || true)
+if [[ "$RESOLVED" != "$(readlink -f "$KO_OVERLAY")" ]]; then
+    warn "modinfo resolves hid_multitouch to $RESOLVED, expected $KO_OVERLAY."
+    warn "depmod ordering may need investigation."
+fi
+
+# --- 5. activate --------------------------------------------------------------
+if [[ "$KVER" != "$(uname -r)" ]]; then
+    log "Built for $KVER, not the running kernel. It becomes active on reboot."
+    exit 0
+fi
+
+log "reloading hid_multitouch (touchpad and touchscreen re-enumerate)"
+if modprobe -r hid_multitouch 2>/dev/null && modprobe hid_multitouch; then
+    LEFT=""
+    for d in /sys/class/input/input*; do
+        [[ "$(cat "$d/name" 2>/dev/null)" == *"2808:5662"*UNKNOWN* ]] && LEFT="$d"
+    done
+    if [[ -n "$LEFT" ]]; then
+        die "phantom device is still present after the reload: $(cat "$LEFT/name")"
+    fi
+    log "phantom KEY_MICMUTE device is gone."
+else
+    warn "Could not reload the module now (device busy?). It will take effect"
+    warn "on the next reboot."
 fi
 
 cat <<EOF
 
 ════════════════════════════════════════════════════════════════════
-  huawei-wmi KEY_MICMUTE storm-detection installed.
+  Phantom KEY_MICMUTE device removed.
 
   Overlay: $KO_OVERLAY
-  Backup of original in-tree module: $BACKUP
-  (delete the overlay file and re-run depmod to revert.)
+  Backup of the in-tree module: $BACKUP
+  (delete the overlay and re-run depmod -a to revert.)
 
-  After REBOOT the patched huawei-wmi.ko will load instead of the in-
-  tree one. The driver will then debounce EC privacy-storm event pairs
-  on WMI event 0x287 (KEY_MICMUTE) by deferring emission of the first
-  event by ${KO_NAME%.ko.zst}'s default 2000 ms window.
+  Verify - this should print nothing:
+    grep -l UNKNOWN /sys/class/input/input*/name | xargs -r grep -H 2808
 
-  Tune at runtime without reboot:
-    \$ echo 1500 | sudo tee /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
-    \$ echo 0    | sudo tee /sys/module/huawei_wmi/parameters/micmute_storm_window_ms  # disable
-
-  Verification (count "Unknown key code 0xf8" lines as storm marker;
-  storm events should still be visible in dmesg but mute will no
-  longer flap):
-    \$ sudo dmesg --since '1 hour ago' | grep -c 'code 0xf8 on isa0060'
+  Verify the real key still works - "Huawei WMI hotkeys" must still list
+  event code 248 (KEY_MICMUTE), and Fn+F7 must still toggle the mic:
+    sudo evtest /dev/input/by-path/platform-huawei-wmi-event
 
   Re-run this script after every kernel update.
 ════════════════════════════════════════════════════════════════════

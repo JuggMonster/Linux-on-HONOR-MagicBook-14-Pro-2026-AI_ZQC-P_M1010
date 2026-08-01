@@ -35,21 +35,24 @@
 #      See patch/sof-audio/install.sh and the patch file:
 #      patch/sof-audio/0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch
 #      Upstream tracking issue: thesofproject/sof#10700.
-#   5) HONOR EC mic-privacy storm on KEY_MICMUTE (WMI 0x287). HONOR EC
-#      firmware fires the mic-privacy WMI event 0x287 autonomously in
-#      2-event pairs (touchpad swipe + focus change, intel_lpmd profile
-#      transitions, or even pure idle), confirmed by `code 0xf8 on
-#      isa0060/serio0` bursts in dmesg. Each pair would self-cancel
-#      but userspace dispatch races leave the mic stuck muted; Fn+F7
-#      no longer restores. Trigger is opaque firmware logic — not
-#      exposed via any WMI setter, no OEM-level disable possible. Step
-#      [8/8] applies a kernel patch to huawei-wmi.c that detects the
-#      storm pair pattern (two 0x287 within `micmute_storm_window_ms`
-#      = default 2000 ms) and drops both events; legitimate single
-#      Fn+F7 press emits normally with at most 2 s latency. Set
-#      `micmute_storm_window_ms=0` via /sys to disable the filter.
+#   5) Microphone mutes and unmutes itself, mic-mute LED flickers.
+#      The FocalTech FTSC1000 touchscreen (I2C HID 2808:5662) declares
+#      a vendor-defined HID collection on usage page 0xff01. That page
+#      is HID_UP_HPVENDOR2 in the kernel, so hid-input maps usage
+#      0xff010001 to KEY_MICMUTE with no vendor check. The device
+#      matches MT_CLS_WIN_8 (export_all_inputs), so hid-multitouch
+#      exports the collection as a second input device whose only key
+#      is KEY_MICMUTE — and because all 59 data bytes carry that usage
+#      and hid-input sets EV_REP, one vendor report leaves the key held
+#      down, auto-repeating at ~30 Hz until reboot. Step [8/8] rebuilds
+#      hid-multitouch.ko with a guard that never exports a vendor-
+#      defined application collection. Touchscreen, touchpad and the
+#      real Fn+F7 (which arrives over WMI, not HID) are unaffected.
 #      See patch/micmute/install.sh and
-#      patch/micmute/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch.
+#      patch/micmute/0001-HID-multitouch-do-not-export-vendor-defined-applicat.patch.
+#      An earlier huawei-wmi storm filter, written against the wrong
+#      diagnosis, is kept but no longer applied automatically:
+#      patch/micmute-wmi-filter/.
 #
 # Fn+F7 mic-mute already works out of the box on this hardware via the
 # huawei-wmi driver (separate "Huawei WMI hotkeys" input device emits
@@ -196,26 +199,26 @@ else
 fi
 
 #────────────────────────────────────────────────────────────────────────
-# [8/8] Build + install huawei-wmi KEY_MICMUTE storm-detection patch.
-# Fetches the running kernel's drivers/platform/x86/huawei-wmi.c from
-# the upstream stable tree, applies the storm-detection patch, builds
-# huawei-wmi.ko out-of-tree, and drops the rebuild into
-# /lib/modules/$KVER/updates/ as an overlay so the in-tree module is
-# left untouched. Original huawei-wmi.ko.zst is backed up to
-# /root/huawei-wmi.ko.zst.orig.
-# The script is idempotent: if upstream has already merged the fix
-# (or our overlay is already in place), it exits without rebuilding.
-# Skipped silently if kernel lockdown / module.sig_enforce blocks
-# unsigned modules — see patch/micmute/install.sh for details.
+# [8/8] Build + install the hid-multitouch phantom-KEY_MICMUTE fix.
+# Fetches the running kernel's drivers/hid/hid-multitouch.c from the
+# upstream stable tree, applies the guard against exporting vendor-
+# defined application collections, builds hid-multitouch.ko out-of-tree
+# and drops the rebuild into /lib/modules/$KVER/updates/ as an overlay
+# so the in-tree module is left untouched. The original
+# hid-multitouch.ko.zst is backed up to /root/hid-multitouch.ko.zst.orig.
+# The script is idempotent: if upstream has already merged the fix (or
+# our overlay is already in place), it exits without rebuilding.
+# Fails loudly if kernel lockdown / module.sig_enforce blocks unsigned
+# modules — see patch/micmute/install.sh for the udev fallback.
 #────────────────────────────────────────────────────────────────────────
-echo "[8/8] Apply huawei-wmi KEY_MICMUTE storm-detection (huawei-wmi rebuild)"
+echo "[8/8] Remove phantom KEY_MICMUTE device (hid-multitouch rebuild)"
 if bash "$PATCH_DIR/micmute/install.sh"; then
     echo "    OK"
 else
-    echo "    [warn] huawei-wmi storm-detection install failed — earlier steps"
-    echo "    are still applied; only the EC privacy-storm pair suppression"
-    echo "    on KEY_MICMUTE will be affected. Inspect"
-    echo "    patch/micmute/install.sh output above."
+    echo "    [warn] hid-multitouch rebuild failed — earlier steps are still"
+    echo "    applied; only the self-toggling microphone will be affected."
+    echo "    Inspect patch/micmute/install.sh output above, or fall back to"
+    echo "    patch/micmute/99-honor-phantom-micmute.rules."
 fi
 
 cat <<EOF
@@ -263,24 +266,25 @@ After reboot, verify:
   # before/after metric. That counter also flips during runtime PM D3
   # cycles and overstates real panics by orders of magnitude.
 
-  # huawei-wmi storm-detection — verify overlay loaded and new parameter present:
-  modinfo -F filename huawei_wmi
-    expect: /lib/modules/.../updates/huawei-wmi.ko.zst
-  modinfo -F parm huawei_wmi | grep micmute_storm_window_ms
-    expect: micmute_storm_window_ms:EC privacy-storm window (ms) ... (int)
-  cat /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
-    expect: 2000  (override at runtime by writing a new value)
+  # hid-multitouch fix — verify the overlay loaded:
+  modinfo -F filename hid_multitouch
+    expect: /lib/modules/.../updates/hid-multitouch.ko.zst
 
-  # When an EC privacy storm fires, dmesg gets a paired "code 0xf8 on
-  # isa0060/serio0" burst regardless of the filter. With the filter the
-  # microphone mute state will NOT flap — count storm events and look at
-  # current LED state:
-  sudo dmesg --since '30 minutes ago' | grep -c 'code 0xf8 on isa0060'
+  # The phantom KEY_MICMUTE device must be gone. This should print nothing:
+  grep -l 'UNKNOWN' /sys/class/input/input*/name | xargs -r grep -H 2808
+
+  # No input device except "Huawei WMI hotkeys" may claim KEY_MICMUTE:
+  grep -B4 '^B: KEY=100000000000000 0 0 0$' /proc/bus/input/devices
+    expect: no match
+
+  # The real Fn+F7 must still work. The WMI device keeps keycode 248
+  # (scancode 0x287), the mic-mute LED follows the audio-micmute trigger:
+  sudo evtest --query /dev/input/by-path/platform-huawei-wmi-event EV_KEY 248
   cat /sys/class/leds/platform::micmute/brightness
-    expect: brightness=0 when mic is meant to be active (no stuck mute)
+    expect: brightness=0 when the mic is meant to be active
 
   # After every kernel update, re-run patch/headset-mic/install.sh,
   # patch/sof-audio/install.sh, AND patch/micmute/install.sh
-  # so the codec quirk + SOF overlay + huawei-wmi storm-detection are
-  # rebuilt against the new headers.
+  # so the codec quirk + SOF overlay + hid-multitouch fix are rebuilt
+  # against the new headers.
 EOF

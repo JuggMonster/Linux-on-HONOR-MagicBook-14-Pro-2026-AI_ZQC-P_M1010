@@ -58,15 +58,19 @@ else
 fi
 [[ -f "$SOF_BACKUP" ]] && echo "    in-tree backup at $SOF_BACKUP retained for next install."
 
-echo "[6/7] Remove huawei-wmi storm-detection overlay (if present)"
-WMI_OVERLAY="/usr/lib/modules/${KVER}/updates/huawei-wmi.ko.zst"
-WMI_BACKUP="/root/huawei-wmi.ko.zst.orig"
-if [[ -f "$WMI_OVERLAY" ]]; then
-    rm -fv "$WMI_OVERLAY"
-else
-    echo "    no overlay at $WMI_OVERLAY — already absent."
-fi
-[[ -f "$WMI_BACKUP" ]] && echo "    in-tree backup at $WMI_BACKUP retained for next install."
+echo "[6/7] Remove module overlays for the mic-mute fixes (if present)"
+for pair in \
+    "/usr/lib/modules/${KVER}/updates/hid-multitouch.ko.zst:/root/hid-multitouch.ko.zst.orig" \
+    "/usr/lib/modules/${KVER}/updates/huawei-wmi.ko.zst:/root/huawei-wmi.ko.zst.orig"
+do
+    OVERLAY="${pair%%:*}"; BACKUP="${pair##*:}"
+    if [[ -f "$OVERLAY" ]]; then
+        rm -fv "$OVERLAY"
+    else
+        echo "    no overlay at $OVERLAY — already absent."
+    fi
+    [[ -f "$BACKUP" ]] && echo "    in-tree backup at $BACKUP retained for next install."
+done
 
 rmdir --ignore-fail-on-non-empty "/usr/lib/modules/${KVER}/updates" 2>/dev/null || true
 depmod -a "$KVER"
@@ -84,6 +88,6 @@ echo "again until apply_patch.sh is re-run or a different fix is installed."
 echo "Analog 3.5mm-jack headset mic input will also disappear."
 echo "SOF DSP will fall back to the in-tree (unpatched) module — expect"
 echo "occasional DSP panics on suspend/resume per thesofproject/sof#10700."
-echo "huawei-wmi will fall back to the in-tree (unpatched) module — EC"
-echo "mic-privacy storm pairs will no longer be filtered, so the mic may"
-echo "spontaneously mute itself again."
+echo "hid-multitouch will fall back to the in-tree (unpatched) module — the"
+echo "touchscreen's vendor HID collection will be exported as a phantom"
+echo "KEY_MICMUTE device again, so the mic will start muting itself."

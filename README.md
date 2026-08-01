@@ -10,12 +10,18 @@ What this repo fixes on a HONOR MagicBook Pro 14 AI under Linux:
    `snd-hda-codec-alc269.ko` with a `SND_PCI_QUIRK` entry for our PCI
    subsystem ID `1ee7:209d`, see
    [3.5mm-jack headset microphone](#35mm-jack-headset-microphone).
+4. **Microphone muting and unmuting on its own** — the touchscreen's
+   vendor HID collection is mapped to `KEY_MICMUTE` by the kernel and
+   ends up stuck down, auto-repeating at ~30 Hz; fixed with one guard
+   in `hid-multitouch`, see
+   [Phantom KEY_MICMUTE from the touchscreen](#phantom-key_micmute-from-the-touchscreen).
 
 What works out of the box and is **not** touched by this patch:
 
-- **Fn+F7 mic-mute key + LED** for the built-in microphone array
-  (DMIC) — handled by the in-tree `huawei-wmi` driver. See
-  [Fn+F7 mic-mute key](#fnf7-mic-mute-key).
+- **The Fn+F7 mic-mute key itself and its LED** for the built-in
+  microphone array (DMIC) — handled by the in-tree `huawei-wmi`
+  driver. See [Fn+F7 mic-mute key](#fnf7-mic-mute-key). Item 4 above
+  is a *different* source of `KEY_MICMUTE`, not this key.
 - **Built-in microphone array (DMIC)**, speakers, headphone output,
   WebCam, Wi-Fi, Bluetooth.
 
@@ -155,25 +161,28 @@ should some application workflow ever trigger it here.
 
 [thesofproject/linux PR #5762]: https://github.com/thesofproject/linux/pull/5762
 
-A fifth, distinct problem turned out to be the **actual** cause of
-the user-visible "mic mutes itself and Fn+F7 won't restore it"
-symptom that the SOF backport was originally chasing: the HONOR EC
-firmware autonomously fires the mic-privacy WMI event 0x287 in
-2-event pairs without any user keypress, triggered by combinations
-of touchpad swipes, focus changes to audio-playing windows,
-`intel_lpmd` platform-profile transitions, and pure idle. The
-trigger is opaque EC firmware logic — the full WMAA dispatcher in
-`SSDT21` was audited and no "disable privacy timer" setter exists.
-HONOR's own Windows PCManager binaries do not call any such setter
-either; Windows just handles the storm pairs fast enough that the
-two source-mute toggles self-cancel without a visible LED flicker,
-whereas on Linux Wayland the userspace dispatch races leave the
-mic stuck muted. `apply_patch.sh` ships a small (+63-line)
-huawei-wmi.c patch (step [8/8]) that detects the storm pair pattern
-at the kernel-driver level and drops both events; see
-[EC mic-privacy storm](#ec-mic-privacy-storm-on-wmi-0x287) for the
-full AML chain, the runtime-tunable `micmute_storm_window_ms`
-module parameter, and verification commands.
+A fifth, distinct problem is the **actual** cause of the
+user-visible "the mic mutes itself and Fn+F7 won't restore it"
+symptom, which both the SOF backport and an earlier `huawei-wmi`
+storm filter were chasing without hitting: a **phantom
+`KEY_MICMUTE` input device created from the touchscreen**. The
+FocalTech FTSC1000 (I²C HID `2808:5662`) declares a vendor-defined
+HID collection on usage page `0xff01`; that page is
+`HID_UP_HPVENDOR2` in the kernel, so `hid-input` maps usage
+`0xff010001` to `KEY_MICMUTE` with no vendor check at all. Since
+the device matches `MT_CLS_WIN_8` (`export_all_inputs`),
+`hid-multitouch` exports the collection as a second input device
+whose only capability is `KEY_MICMUTE` — and because all 59 data
+bytes of the report carry that same usage and `hid-input` sets
+`EV_REP` for the page, one vendor report leaves the key **held
+down and auto-repeating at ~30 Hz until reboot**. Measured on this
+unit: 29 `KEY_MICMUTE` events per second, continuously, 8.5 hours
+into an uptime, with nobody touching the machine. `apply_patch.sh`
+step [8/8] rebuilds `hid-multitouch.ko` with a guard that never
+exports a vendor-defined application collection; the touchscreen,
+the touchpad and the real Fn+F7 key (which arrives over WMI, not
+over HID) are unaffected. See
+[Phantom KEY_MICMUTE from the touchscreen](#phantom-key_micmute-from-the-touchscreen).
 
 ---
 
@@ -235,17 +244,19 @@ under `/root/honor-zqcp-fix-backup-*` on each apply).
    no-op. It is skipped with a warning if kernel lockdown or
    `module.sig_enforce=1` would block the unsigned overlay.
 9. Runs `patch/micmute/install.sh` which fetches the running
-   kernel's `drivers/platform/x86/huawei-wmi.c` from the upstream
-   stable tree, applies
-   `patch/micmute/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch`
-   (a local +63-line storm-detection patch), builds `huawei-wmi.ko`
-   out-of-tree against the installed kernel headers, and drops the
-   rebuild into `/lib/modules/$(uname -r)/updates/huawei-wmi.ko.zst`
-   as an overlay (the in-tree module is left untouched and the
-   original is saved as `/root/huawei-wmi.ko.zst.orig`). The new
-   module exposes a runtime-tunable `micmute_storm_window_ms`
-   parameter (default 2000 ms; 0 disables the filter). Same
-   idempotency, lockdown, and sig_enforce handling as step 8.
+   kernel's `drivers/hid/hid-multitouch.c` from the upstream stable
+   tree, applies
+   `patch/micmute/0001-HID-multitouch-do-not-export-vendor-defined-applicat.patch`
+   (a +19-line guard), builds `hid-multitouch.ko` out-of-tree
+   against the installed kernel headers, and drops the rebuild into
+   `/lib/modules/$(uname -r)/updates/hid-multitouch.ko.zst` as an
+   overlay (the in-tree module is left untouched and the original is
+   saved as `/root/hid-multitouch.ko.zst.orig`). It then reloads the
+   module and verifies that the phantom `KEY_MICMUTE` device is
+   gone. Same idempotency, lockdown, and sig_enforce handling as
+   step 8; where modules cannot be built at all,
+   `patch/micmute/99-honor-phantom-micmute.rules` is a weaker
+   libinput-level fallback.
 
 After a reboot, sanity checks:
 
@@ -286,12 +297,16 @@ sudo rtcwake -m mem -s 5     # repeat 2-3 times
 journalctl -k -b | grep -iE 'sof.*(panic|crash|exception)'
 #   → empty
 
-# huawei-wmi storm-detection is active — overlay loaded and the new
-# tunable parameter is exposed:
-modinfo -F filename huawei_wmi
-#   → /lib/modules/.../updates/huawei-wmi.ko.zst
-cat /sys/module/huawei_wmi/parameters/micmute_storm_window_ms
-#   → 2000  (write any other value to retune, 0 to disable)
+# hid-multitouch fix is active — overlay loaded:
+modinfo -F filename hid_multitouch
+#   → /lib/modules/.../updates/hid-multitouch.ko.zst
+
+# The phantom KEY_MICMUTE device is gone — this prints nothing:
+grep -l 'UNKNOWN' /sys/class/input/input*/name | xargs -r grep -H 2808
+
+# The real Fn+F7 still works — "Huawei WMI hotkeys" keeps keycode 248:
+grep -A9 'Huawei WMI hotkeys' /proc/bus/input/devices | grep '^B: KEY='
+#   → B: KEY=1000000000000000 0 0 101400300040000 ...  (bit 248 set)
 ```
 
 ---
@@ -306,20 +321,17 @@ audio shortcut binding toggles the PipeWire default source mute; the
 F7 LED follows via the `audio-micmute` LED trigger that `huawei-wmi`
 registers on `/sys/class/leds/platform::micmute`.
 
-What is NOT stable on stock mainline is the **HONOR EC firmware**
-itself: it autonomously fires the mic-privacy WMI event (0x287,
-`KEY_MICMUTE`) in 2-event pairs without any user keypress —
-triggered by touchpad swipes that change focus to an audio-playing
-window, by `intel_lpmd` platform-profile transitions, and even
-during pure idle. Each pair would normally self-cancel (two
-toggles return to the original state), but userspace dispatch
-races (Wayland compositor + `gsd-media-keys` grab + audio
-backend) lose one of the two toggles and leave the mic stuck
-muted, with the platform::micmute LED on and Fn+F7 unable to
-restore it. Step [8/8] in `apply_patch.sh` installs a kernel
-patch that detects the storm pair pattern and drops both events;
-see [EC mic-privacy storm](#ec-mic-privacy-storm-on-wmi-0x287)
-for the full root-cause chain and the tunable parameter.
+What breaks the chain is a **second, phantom source of
+`KEY_MICMUTE`** that appears once the SSDT override makes the I²C
+touch controllers enumerate: the touchscreen's vendor-defined HID
+collection is mapped to `KEY_MICMUTE` by the kernel and ends up
+stuck down, auto-repeating at ~30 Hz. The mute then flips on the
+press/release edges of that phantom key, seemingly at random, and
+whichever toggle the desktop loses to a race leaves the mic muted
+with the platform::micmute LED on. Step [8/8] in `apply_patch.sh`
+removes the phantom device; see
+[Phantom KEY_MICMUTE from the touchscreen](#phantom-key_micmute-from-the-touchscreen)
+for the measurement and the fix.
 
 A separate but unrelated issue used to also break this chain: the
 SOF DSP firmware on Panther Lake can panic on suspend/resume under
@@ -351,12 +363,13 @@ PipeWire 1.6.6, GNOME 50 Wayland and niri.
    exactly that mistake; if you have leftover files from them, see
    [Removing an old Fn+F7 keymap fix](#removing-an-old-fnf7-keymap-fix).
 
-   The same `0xf8` line is **also** the forensic marker for the EC
-   privacy storm: a legitimate human Fn+F7 press produces ONE
-   `code 0xf8` pair (press + release) in the kernel log, whereas
-   the EC storm produces TWO pairs within ~1 second. Counting these
-   in dmesg (`grep -c 'code 0xf8 on isa0060'`) is how we measured
-   the burst rate during the investigation.
+   This line was used for a while as the forensic marker for a
+   supposed EC "privacy storm". That was a mistake: `0xf8` is
+   emitted for **every** Fn+F7 press, including the repeated ones
+   made while fighting the self-toggling, so counting it conflated
+   deliberate presses with spurious events. The real spurious
+   source does not touch i8042 at all — see
+   [Phantom KEY_MICMUTE from the touchscreen](#phantom-key_micmute-from-the-touchscreen).
 
 2. **The LED follows only the built-in DMIC array's mute, not the
    analog headset mic's mute.** On this hardware the audio chain is
@@ -405,12 +418,162 @@ on probe.
 
 ---
 
-## EC mic-privacy storm on WMI 0x287
+## Phantom KEY_MICMUTE from the touchscreen
 
-The HONOR EC firmware on this laptop autonomously fires the
-mic-privacy WMI event 0x287 (`KEY_MICMUTE`) in 2-event pairs without
-any user keypress. The "privacy storm" is triggered by various
-combinations of:
+This is what actually made the microphone mute and unmute on its
+own, and it is a kernel bug rather than anything HONOR-specific.
+
+The touchscreen is a FocalTech **FTSC1000**, I²C HID `2808:5662`.
+Besides its Win8 digitizer collections its report descriptor
+declares a vendor-defined application collection:
+
+```
+Usage Page (0xff01)
+Usage (0x01)
+Collection (Application)
+    Report ID (0x10)
+    Report Size (8)
+    Report Count (0x3b)      <- 59 bytes
+    Usage (0x01)
+    Input (Data,Var,Abs)
+End Collection
+```
+
+That is a raw firmware/diagnostic data channel. The trouble is what
+usage page `0xff01` means to Linux — `include/linux/hid.h`:
+
+```c
+#define HID_UP_HPVENDOR2        0xff010000
+```
+
+It is the page **HP** uses for its hotkey buttons, and
+`drivers/hid/hid-input.c` maps it with no vendor check at all:
+
+```c
+	case HID_UP_HPVENDOR2:
+		set_bit(EV_REP, input->evbit);
+		switch (usage->hid & HID_USAGE) {
+		case 0x001: map_key_clear(KEY_MICMUTE);		break;
+```
+
+So usage `0xff010001` becomes `KEY_MICMUTE` on a FocalTech
+touchscreen. Three things then compound it:
+
+1. the device matches `MT_CLS_WIN_8`, which sets
+   `export_all_inputs`, so `hid-multitouch` does not filter the
+   collection out;
+2. `HID_QUIRK_INPUT_PER_APP` gives the collection its own input
+   device — the `FTSC1000:00 2808:5662 UNKNOWN` node, whose **only**
+   capability is `KEY_MICMUTE`;
+3. all 59 data bytes carry the same usage and the field is 8 bits
+   wide with a logical range of 0..255, so any non-zero byte in a
+   vendor report is a key press. Since the same code path also sets
+   `EV_REP`, one such report leaves the key held down and
+   auto-repeating forever.
+
+Measured on this unit:
+
+```
+$ cat /proc/bus/input/devices
+I: Bus=0018 Vendor=2808 Product=5662 Version=0100
+N: Name="FTSC1000:00 2808:5662 UNKNOWN"
+H: Handlers=kbd event6
+B: KEY=100000000000000 0 0 0        <- bit 248 only = KEY_MICMUTE
+
+$ sudo evtest /dev/input/event6
+12:14:00.736 type=1 code=248 value=2
+12:14:00.770 type=1 code=248 value=2
+12:14:00.804 type=1 code=248 value=2
+...
+```
+
+29 `KEY_MICMUTE` autorepeat events per second, continuously, 8.5
+hours into an uptime, with nobody touching the machine. `EVIOCGKEY`
+confirmed the key was stuck pressed; `EVIOCGKEYCODE` confirmed the
+mapping (`scancode 0xff010001 -> keycode 248`).
+
+Compositors ignore most autorepeats, which is why the mic does not
+toggle thirty times a second. What the user sees is the
+press/release edges: every time a vendor report goes zero →
+non-zero → zero the mute toggles once more, and whichever toggle
+the desktop loses to a race leaves the mic stuck muted.
+
+The same phantom device is why the sibling FMB-P port ships a
+`LIBINPUT_IGNORE_DEVICE` udev rule for
+`ATTRS{id/vendor}=="2808", ATTRS{id/product}=="5662", ATTRS{name}=="*UNKNOWN*"`.
+
+### The fix
+
+`patch/micmute/0001-HID-multitouch-do-not-export-vendor-defined-applicat.patch`
+adds one guard to `mt_input_mapping()`: never export a
+vendor-defined application collection, whatever `export_all_inputs`
+says. A vendor collection is by definition not portable input, only
+the vendor's own driver can interpret it. The existing Asus
+custom-media-keys exception is preserved.
+
+Verified live after installing it:
+
+- the `... UNKNOWN` input device is gone, and with it every phantom
+  event;
+- the touchscreen still works (multitouch + `BTN_TOUCH`);
+- the touchpad, also driven by `hid-multitouch`, still works;
+- `Huawei WMI hotkeys` still lists keycode 248, so the **real Fn+F7
+  is untouched** — it arrives over WMI (`scancode 0x287 → keycode
+  248`), never over HID.
+
+A `udev` hwdb entry (`KEYBOARD_KEY_ff010001=reserved`) looks like
+the obvious no-build fix and does **not** work:
+`hidinput_setkeycode()` remaps only the *first* usage matching a
+scancode and then re-sets the capability bit, because the other 58
+usages still map to 248. Tested — the storm continued unchanged.
+The libinput rule in
+`patch/micmute/99-honor-phantom-micmute.rules` is the fallback for
+machines that cannot load an out-of-tree module; it is strictly
+weaker, since the kernel keeps generating the events.
+
+The deeper fix belongs in `hid-input.c`, which should not turn a
+59-byte data field into a key on the strength of a *vendor* usage
+page. HP's hotkeys are single-bit buttons, so a
+`if (field->report_size != 1) goto ignore;` in the `HID_UP_HPVENDOR2`
+case would fix the whole class of device. Not shipped here because
+`hid-input.c` is part of `hid.ko` and cannot be swapped in as
+cheaply as `hid-multitouch.ko`, and because the claim about HP's
+field width has not been verified against real HP hardware.
+
+### Rolling back
+
+```bash
+sudo rm /lib/modules/$(uname -r)/updates/hid-multitouch.ko.zst
+sudo depmod -a
+sudo reboot
+```
+
+The original in-tree module is also kept at
+`/root/hid-multitouch.ko.zst.orig`.
+
+---
+
+## EC mic-privacy storm on WMI 0x287 (superseded)
+
+> **This section describes an earlier, wrong diagnosis.** The
+> self-toggling microphone was tracked down to a phantom
+> `KEY_MICMUTE` input device created from the touchscreen's HID
+> descriptor — see
+> [Phantom KEY_MICMUTE from the touchscreen](#phantom-key_micmute-from-the-touchscreen).
+> Everything below is accurate as a description of how the
+> **legitimate** Fn+F7 key reaches the kernel, and the AML trace is
+> worth keeping. What was never established is that the EC fires
+> `0x287` on its own: the burst counts came from `code 0xf8` lines
+> in `dmesg`, which real key presses produce too. The `huawei-wmi`
+> filter built on this theory still exists, under
+> `patch/micmute-wmi-filter/`, but it is no longer installed by
+> `apply_patch.sh`. Keep it only if self-toggling survives the HID
+> fix.
+
+The reading at the time was that the HONOR EC firmware
+autonomously fires the mic-privacy WMI event 0x287 (`KEY_MICMUTE`)
+in 2-event pairs without any user keypress, in a "privacy storm"
+triggered by various combinations of:
 
 - touchpad swipe gestures (multi-finger workspace/overview swipes)
   that change focus to a window doing audio playback
@@ -485,8 +648,8 @@ returns mute to the original state without a visible LED flicker.
 
 ### The fix
 
-`apply_patch.sh` step [8/8] (= `patch/micmute/install.sh`)
-backports a small (+63-line) patch to
+`patch/micmute-wmi-filter/install.sh` (no longer part of
+`apply_patch.sh`) backports a small (+63-line) patch to
 `drivers/platform/x86/huawei-wmi.c` that detects the storm pair
 pattern at the driver level:
 
@@ -502,7 +665,7 @@ pattern at the driver level:
 
 All other WMI events (volume, brightness, wlan, …) keep the upstream
 immediate-emit behaviour. The patch file is at
-`patch/micmute/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch`.
+`patch/micmute-wmi-filter/0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch`.
 
 ### Runtime tuning
 
@@ -570,9 +733,9 @@ sudo reboot
 The in-tree (unpatched) module is restored as the resolved
 candidate. The original is also kept at
 `/root/huawei-wmi.ko.zst.orig` for byte-for-byte restore if desired.
-After rolling back the storm will resume — there is no upstream
-firmware fix from HONOR at the time of writing and the EC trigger
-is not exposed via any documented ACPI/WMI ABI.
+Rolling this back is safe now that the phantom-key fix is in
+place: with the HID fix installed, no self-toggling was observed
+without the WMI filter.
 
 ---
 
@@ -1080,21 +1243,36 @@ tree.
 
 ```
 HONOR_ZQC-P_M1010/
-├── README.md                          # this file
-├── apply_patch.sh                     # one-shot installer (idempotent)
-├── uninstall_patch.sh                 # revert installer
-├── patch/
-│   ├── SSDT27_TPD0.aml                # ready-to-install ACPI override (binary)
-│   ├── SSDT27_TPD0.dsl                # human-readable source
-│   ├── acpi_override.install          # mkinitcpio install hook (early CPIO)
-│   ├── alc269-honor-zqc-p-m1010.patch # kernel patch: ALC256 quirk for 1ee7:209d
-│   ├── install-alc269-fix.sh          # build+install snd-hda-codec-alc269.ko
-│   ├── 0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch
-│   │                                  # kernel patch: PR #5762 backport
-│   ├── install-sof-ipc4-fix.sh        # build+install snd-sof.ko (updates/ overlay)
-│   ├── 0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch
-│   │                                  # kernel patch: EC privacy-storm filter
-│   └── install-huawei-wmi-fix.sh      # build+install huawei-wmi.ko (updates/ overlay)
+├── README.md                       # this file
+├── apply_patch.sh                  # one-shot installer (idempotent)
+├── uninstall_patch.sh              # revert installer
+├── patch/                          # one self-contained directory per fix
+│   ├── README.md                   # index + status table
+│   ├── acpi-override/              # patched SSDT27 — touchpad, touchscreen, keyboard
+│   │   ├── SSDT27_TPD0.aml         #   ready-to-install ACPI override (binary)
+│   │   ├── SSDT27_TPD0.dsl         #   human-readable source
+│   │   └── acpi_override.install   #   mkinitcpio install hook (early CPIO)
+│   ├── micmute/                    # phantom KEY_MICMUTE from the touchscreen
+│   │   ├── 0001-HID-multitouch-do-not-export-vendor-defined-applicat.patch
+│   │   ├── 99-honor-phantom-micmute.rules   # libinput fallback, no build needed
+│   │   └── install.sh              #   build+install hid-multitouch.ko (updates/)
+│   ├── micmute-wmi-filter/         # earlier huawei-wmi storm filter — optional
+│   │   ├── 0001-platform-x86-huawei-wmi-Storm-detection-for-KEY_MICMUTE-0x287.patch
+│   │   └── install.sh
+│   ├── headset-mic/                # ALC256 quirk for PCI SSID 1ee7:209d
+│   │   ├── alc269-honor-zqc-p-m1010.patch
+│   │   └── install.sh              #   build+install snd-hda-codec-alc269.ko
+│   ├── sof-audio/                  # preventive IPC4 backport (PR #5762)
+│   │   ├── 0001-ASoC-SOF-ipc4-topology-Refresh-copier-IPC-payload-before-widget-setup.patch
+│   │   └── install.sh              #   build+install snd-sof.ko (updates/ overlay)
+│   ├── fingerprint/                # Goodix 27c6:6f94 in libfprint
+│   │   ├── libfprint-goodixmoc-honor-zqc-p-6f94.patch
+│   │   ├── PKGBUILD                #   pacman-owned rebuild, avoids file conflicts
+│   │   └── install.sh
+│   └── fan/                        # honor-zqcp-hwmon — EC fan tachometers (read-only)
+│       ├── honor-zqcp-hwmon.c
+│       ├── Makefile / dkms.conf
+│       └── install.sh
 ├── build/
 │   ├── build_patch.sh              # iasl + checksum recompute + revision bump
 │   └── extract_oem_acpi.sh         # dump live ACPI tables for new investigations
@@ -1109,6 +1287,9 @@ HONOR_ZQC-P_M1010/
                                     # (~300 MiB → ~12 MiB; decompress with
                                     # `zstd -d HKEY_LOCAL_MACHINE.reg.zst`)
 ```
+
+Every subdirectory of `patch/` also carries its own `README.md` with the
+measurements behind the fix and the approaches that were ruled out.
 
 ---
 
@@ -1175,6 +1356,7 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 | Caps Lock LED | (keyboard-internal, driven via atkbd `SET_LEDS`) | (same) | ❌ *blocked by `i8042.dumbkbd=1` — see [Caps Lock LED](#caps-lock-led--known-limitation)* |
 | Hotkey / function-key WMI | `huawei_wmi`, "Huawei WMI hotkeys" input | Huawei PC Manager hotkey driver | ✅ |
 | **Fn+F7 mic-mute key** | `huawei_wmi` WMI hot-key → `KEY_MICMUTE`; LED at `/sys/class/leds/platform::micmute` with `audio-micmute` trigger | Huawei PC Manager mic toggle | ✅ *works out of the box*; LED only follows DMIC mute, not the analog headset mic — see [Fn+F7 mic-mute key](#fnf7-mic-mute-key) |
+| **Phantom `KEY_MICMUTE`** | `hid-multitouch` exported the FTSC1000 touchscreen's `0xff01` vendor collection, which `hid-input` maps to `KEY_MICMUTE` | none — a FocalTech driver claims the collection | ✅ fixed by [`patch/micmute/`](patch/micmute/); without it the mic mutes itself continuously |
 | PS/2 mouse port (legacy) | ACPI `MSFT0003`, status=0 | (disabled by firmware) | ➖ disabled in firmware (correctly) |
 | ACPI Video / brightness | `acpi-video`, "Video Bus" input | Intel Display Control | ✅ |
 

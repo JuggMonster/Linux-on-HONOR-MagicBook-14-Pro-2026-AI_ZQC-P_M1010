@@ -13,7 +13,8 @@ CachyOS, kernel 7.1.5.
 | Touchpad / touchscreen / internal keyboard | ✅ working | [`acpi-override/`](acpi-override/) — patched SSDT27 + `i8042.dumbkbd=1`; **prerequisite for a usable machine** |
 | Fingerprint reader (Goodix `27c6:6f94`) | ✅ working | [`fingerprint/`](fingerprint/) — two-line `libfprint` id patch |
 | Headset microphone (3.5 mm jack) | ✅ working | [`headset-mic/`](headset-mic/) — one-line `SND_PCI_QUIRK` for ALC256 |
-| Spurious mic-mute toggling (Fn+F7) | ✅ mitigated | [`micmute/`](micmute/) — `huawei-wmi` EC storm filter |
+| Microphone mutes itself, mic-mute LED flickers | ✅ working | [`micmute/`](micmute/) — one guard in `hid-multitouch`; the touchscreen's vendor HID collection was being mapped to `KEY_MICMUTE` |
+| ↳ earlier `huawei-wmi` storm filter | ➖ optional | [`micmute-wmi-filter/`](micmute-wmi-filter/) — built against the earlier, wrong diagnosis; keep only if symptoms survive |
 | Fan RPM readout | ✅ working | [`fan/`](fan/) — `honor-zqcp-hwmon` hwmon module |
 | Fan **control** | ❌ not available | see [`fan/README.md`](fan/README.md); every OS-side path was tested and the EC ignores all of them |
 | SOF DSP suspend/resume panic | ➖ preventive | [`sof-audio/`](sof-audio/) — upstream IPC4 backport; the race never reproduced on this unit |
@@ -34,13 +35,13 @@ sudo bash patch/fan/install.sh
 
 ## Kernel updates
 
-The out-of-tree module fixes (`headset-mic/`, `micmute/`, `sof-audio/`) build
-against the running kernel's headers and must be re-run after every kernel
-update. `fan/` uses DKMS when available and rebuilds itself.
+The out-of-tree module fixes (`headset-mic/`, `micmute/`, `micmute-wmi-filter/`
+and `sof-audio/`) build against the running kernel's headers and must be re-run
+after every kernel update. `fan/` uses DKMS when available and rebuilds itself.
 
 On a rolling distribution you will regularly have a kernel installed but not
 yet booted, at which point the *running* kernel's headers no longer exist and
-nothing can build. `fan/install.sh` and `micmute/install.sh` accept a `KVER`
+nothing can build. `fan/`, `micmute/` and `micmute-wmi-filter/` accept a `KVER`
 override to pre-build for the installed kernel instead:
 
 ```sh
@@ -54,7 +55,8 @@ repo should shrink as they land:
 
 - the `libfprint` id addition for Goodix `27c6:6f94`
 - the `SND_PCI_QUIRK` entry for PCI SSID `1ee7:209d`
-- the `huawei-wmi` storm filter (needs discussion — it is a workaround for an
-  EC firmware bug, not a driver bug)
+- the `hid-multitouch` guard against exporting vendor-defined collections —
+  this one is a genuine kernel bug and affects any Win8 touchscreen whose
+  firmware uses HID usage page `0xff01`, not just this laptop
 
 The SSDT override is firmware-specific and stays here.

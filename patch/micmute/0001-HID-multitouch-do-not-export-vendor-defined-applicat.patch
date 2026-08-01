@@ -1,0 +1,73 @@
+From: HONOR MagicBook Pro 14 AI (ZQC-P/M1010) Linux port
+Subject: [PATCH] HID: multitouch: do not export vendor-defined application
+ collections
+
+The FocalTech FTSC1000 touchscreen (I2C HID 2808:5662) fitted to HONOR
+MagicBook laptops declares, besides its Win8 digitizer collections, a
+vendor-defined application collection on usage page 0xff01:
+
+    Usage Page (0xff01)
+    Usage (0x01)
+    Collection (Application)
+        Report ID (0x10)
+        Report Size (8)
+        Report Count (0x3b)
+        Usage (0x01)
+        Input (Data,Var,Abs)
+    End Collection
+
+It is a 59 byte raw data channel. But 0xff01 is also HID_UP_HPVENDOR2,
+the page HP uses for its hotkey buttons, and hid-input maps usage
+0xff010001 to KEY_MICMUTE unconditionally:
+
+    case HID_UP_HPVENDOR2:
+            set_bit(EV_REP, input->evbit);
+            switch (usage->hid & HID_USAGE) {
+            case 0x001: map_key_clear(KEY_MICMUTE);         break;
+
+The device matches MT_CLS_WIN_8, which sets export_all_inputs, so the
+collection is exported. With HID_QUIRK_INPUT_PER_APP that produces an
+extra input device whose only capability is KEY_MICMUTE, fed by 59
+eight-bit data fields that all carry the same usage. Any non-zero byte
+in a vendor report is a key press; because hid-input also sets EV_REP
+for this page, one such report leaves KEY_MICMUTE held down and
+auto-repeating at ~30 Hz for the rest of the uptime.
+
+The user-visible effect is a microphone that mutes and unmutes on its
+own and a mic-mute LED that flickers. Measured on a HONOR MagicBook Pro
+14 AI (ZQC-P/M1010): 29 KEY_MICMUTE events per second, continuously,
+with no user interaction.
+
+A vendor-defined application collection is by definition not portable
+input; only the vendor's own driver can interpret it. hid-multitouch
+should not export it, whatever export_all_inputs says. The one existing
+exception, the Asus custom media keys collection, is preserved.
+
+--- a/drivers/hid/hid-multitouch.c
++++ b/drivers/hid/hid-multitouch.c
+@@ -1502,6 +1502,25 @@
+ 		return -1;
+
+ 	/*
++	 * Vendor-defined application collections carry raw firmware or
++	 * diagnostic data, not input. Exporting them is actively harmful,
++	 * because hid-input maps a few vendor usage pages onto real keys:
++	 * page 0xff01 is HP's hotkey page, where usage 0x01 is KEY_MICMUTE.
++	 * A device that uses the same page for anything else therefore turns
++	 * every vendor report into phantom key events.
++	 *
++	 * Seen on the FocalTech FTSC1000 (2808:5662) touchscreen fitted to
++	 * HONOR MagicBook laptops: its 0xff01 collection is a 59 byte data
++	 * channel, and because MT_CLS_WIN_8 sets export_all_inputs it was
++	 * exported as a keyboard whose only key was KEY_MICMUTE, left
++	 * permanently held down and auto-repeating at ~30 Hz.
++	 */
++	if ((field->application & HID_USAGE_PAGE) >= HID_UP_MSVENDOR &&
++	    !(field->application == HID_VD_ASUS_CUSTOM_MEDIA_KEYS &&
++	      application->quirks & MT_QUIRK_ASUS_CUSTOM_UP))
++		return -1;
++
++	/*
+ 	 * Some Asus keyboard+touchpad devices have the hotkeys defined in the
+ 	 * touchpad report descriptor. We need to treat these as an array to
+ 	 * map usages to input keys.
