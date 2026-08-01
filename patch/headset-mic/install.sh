@@ -59,6 +59,45 @@ fi
 echo "[*] kernel = ${KVER}"
 echo "[*] target = ${KO_OVERLAY}"
 
+# --- WirePlumber: keep the internal DMIC as the default capture source -------
+# The quirk uses JACK_DETECT_OVERRIDE, so the jack input is always reported
+# present and WirePlumber ranks it (priority.session 2000) above the built-in
+# digital microphone array (1648). That makes an empty jack the default
+# recording device, and it breaks the mic-mute LED, because the kernel's
+# control-LED group only tracks the DMIC control. Rank the jack input below
+# the array; it stays fully usable, it is simply no longer the default.
+WP_RULE="${SCRIPT_DIR}/51-honor-zqcp-mic-priority.conf"
+WP_DIR="/etc/wireplumber/wireplumber.conf.d"
+if [[ -f "$WP_RULE" ]]; then
+    echo "[*] installing ${WP_DIR}/$(basename "$WP_RULE")"
+    install -d -m 0755 "$WP_DIR"
+    install -m 0644 "$WP_RULE" "$WP_DIR/"
+
+    # WirePlumber remembers a manually chosen default source and that choice
+    # outranks the priority rule. Drop a stale one so the rule decides.
+    WP_USER="${SUDO_USER:-}"
+    if [[ -n "$WP_USER" && "$WP_USER" != "root" ]]; then
+        WP_HOME=$(getent passwd "$WP_USER" | cut -d: -f6)
+        rm -f "${WP_HOME}/.local/state/wireplumber/default-nodes"
+        WP_RD="/run/user/$(id -u "$WP_USER" 2>/dev/null || echo 0)"
+        if [[ -d "$WP_RD" ]]; then
+            sudo -u "$WP_USER" \
+                XDG_RUNTIME_DIR="$WP_RD" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=${WP_RD}/bus" \
+                systemctl --user restart wireplumber 2>/dev/null \
+                && echo "[ok] wireplumber restarted for ${WP_USER}" \
+                || echo "[*] restart wireplumber (or log out and back in) to apply"
+        fi
+    else
+        echo "[*] restart wireplumber (or log out and back in) to apply"
+    fi
+else
+    echo "[warn] ${WP_RULE##*/} not found next to this script - skipping the"
+    echo "       capture-priority rule. The 3.5 mm jack input may become the"
+    echo "       default source and the mic-mute LED will not follow Fn+F7."
+fi
+
+
 # Remove the previous-iteration systemd workaround if it's still installed.
 # It was a userspace hotfix for the same problem this kernel fixup now
 # solves at the source; keeping it active would pointlessly fire an extra

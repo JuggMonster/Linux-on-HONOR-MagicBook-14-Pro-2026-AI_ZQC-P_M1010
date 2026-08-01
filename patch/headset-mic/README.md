@@ -41,6 +41,67 @@ This is the most obviously upstreamable change in the repo — a single table
 entry, exactly like the hundreds already in that file. It should be submitted
 to `alsa-devel`; once merged, drop this directory.
 
+## Default capture source and the mic-mute LED
+
+The quirk sets pin `0x19` to `0x01a1913c`, which includes `JACK_DETECT_OVERRIDE`
+because this codec reports no jack presence for that pin. The port is therefore
+always "available", and WirePlumber ranked the resulting source above the
+built-in microphone array:
+
+| Source | UCM name | `priority.session` |
+|---|---|---|
+| 3.5 mm jack input | `HiFi__Mic2__source` | 2000 |
+| built-in digital array | `HiFi__Mic1__source` | 1648 |
+
+Two things broke as a result:
+
+1. with nothing plugged into the jack, the default recording device was a dead
+   analog input;
+2. the mic-mute LED stopped following Fn+F7.
+
+The LED failure is worth spelling out, because the obvious fix does not work.
+The kernel's control-LED layer (`snd_ctl_led`) drives the `audio-micmute`
+trigger that `huawei-wmi` puts on `/sys/class/leds/platform::micmute`. The SOF
+machine driver attaches exactly one control to the mic LED group,
+`Dmic0 Capture Switch`. Fn+F7 mutes the *default source*, which was the analog
+path, so it toggled `Capture Switch` instead and the LED never moved.
+
+Attaching `Capture Switch` to the group as well does **not** help, because
+`snd_ctl_led` uses AND semantics:
+
+```c
+UPDATE_ROUTE(route, snd_ctl_led_get(lctl));   /* OR of "is unmuted" */
+...
+led_trigger_event(trig, route ? LED_OFF : LED_ON);
+```
+
+The LED lights only when *every* attached control is muted. With both attached,
+muting one leaves the other unmuted and the LED stays dark. Verified live.
+
+`51-honor-zqcp-mic-priority.conf` fixes it at the right layer: it lowers the
+jack input to `priority.session = 1400`, below the array. The array becomes the
+default again, Fn+F7 mutes `Dmic0 Capture Switch`, and the LED follows. The jack
+input stays fully usable, applications can still select it.
+
+`install.sh` drops the file into `/etc/wireplumber/wireplumber.conf.d/`,
+removes a stale `~/.local/state/wireplumber/default-nodes` (a manually chosen
+default outranks the priority rule) and restarts WirePlumber for the invoking
+user.
+
+Verify:
+
+```sh
+wpctl status | sed -n '/Sources:/,/Filters/p'     # the array must carry the *
+wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 1
+cat /sys/class/leds/platform::micmute/brightness  # 1
+wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0
+cat /sys/class/leds/platform::micmute/brightness  # 0
+```
+
+Known remaining limit: mute the jack input while it is *not* the default and
+the LED will not move, for the same AND reason. Nothing in the kernel's
+control-LED design covers "whichever mic the desktop is currently using".
+
 ## Surviving kernel updates
 
 The rebuilt module is installed as `/usr/lib/modules/$KVER/updates/snd-hda-codec-alc269.ko.zst`,

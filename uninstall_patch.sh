@@ -26,8 +26,10 @@ fi
 
 KVER=$(uname -r)
 
-echo "[4/8] Remove the ALC256 codec-quirk overlay"
+echo "[4/8] Remove the ALC256 codec-quirk overlay and the capture-priority rule"
 rm -fv "/usr/lib/modules/${KVER}/updates/snd-hda-codec-alc269.ko.zst" 2>/dev/null || true
+rm -fv /etc/wireplumber/wireplumber.conf.d/51-honor-zqcp-mic-priority.conf 2>/dev/null || true
+rmdir --ignore-fail-on-non-empty /etc/wireplumber/wireplumber.conf.d /etc/wireplumber 2>/dev/null || true
 
 echo "[4b/8] Restore original snd-hda-codec-alc269.ko.zst if a legacy in-place install is present"
 ALC_PATH="/usr/lib/modules/${KVER}/kernel/sound/hda/codecs/realtek/snd-hda-codec-alc269.ko.zst"

@@ -160,7 +160,7 @@ Details and the manual fallback are in
 |---|---|
 | **Caps Lock LED stays dark** | `i8042.dumbkbd=1`, needed for the internal keyboard, also disables atkbd's `SET_LEDS` path. Details and an experiment to try below |
 | **Fan control is not possible** | the EC owns the fan curve. `SFNS` is gated on an `MFGM` flag no AML path ever sets, and the DPTF `TFN1` cooling device accepts writes that the EC ignores. Both tested, see [`patch/fan/README.md`](patch/fan/README.md) |
-| **Mic-mute LED follows the DMIC only** | the `audio-micmute` LED trigger is updated from the SOF DMIC mute path. With the analog headset mic selected, Fn+F7 mutes the right source but the LED does not move. See [`patch/headset-mic/README.md`](patch/headset-mic/README.md) |
+| **Mic-mute LED follows the built-in array only** | the kernel's control-LED group tracks `Dmic0 Capture Switch` and lights the LED only when *every* attached control is muted. Mute the 3.5 mm jack input while it is not the default and the LED does not move. The built-in array is the default, so Fn+F7 works normally. See [`patch/headset-mic/README.md`](patch/headset-mic/README.md) |
 | **MIPI / IPU6 cameras unconfigured** | no sensor on this SKU |
 | **NFC unusable** | the `NTAG0001` controller sits on I²C-1 and Linux has no driver for it |
 | **Some OEM helper ACPI devices disabled** | `INTC10CC` HID Discovery, `INTC10DF` TSE and similar are disabled by firmware and are not needed for any user-visible function |
