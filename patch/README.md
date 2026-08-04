@@ -16,6 +16,7 @@ kernel 7.1.5.
 | Microphone mutes itself, mic-mute LED flickers | works | [`micmute/`](micmute/) — HID-BPF fixup for the touchscreen's vendor collection |
 | Fingerprint reader, Goodix `27c6:6f94` | works | [`fingerprint/`](fingerprint/) — two-line `libfprint` id patch |
 | Headset microphone, 3.5 mm jack | works | [`headset-mic/`](headset-mic/) — one-line `SND_PCI_QUIRK` for ALC256 |
+| OLED minimum brightness too low, uneven steps | works | [`oled-backlight/`](oled-backlight/) — patched VBT raises the firmware's backlight floor |
 | Fan RPM readout | works | [`fan/`](fan/) — `honor-zqcp-hwmon` module |
 | Fan control | not available | [`fan/README.md`](fan/README.md) — every OS-side path was tested, the EC ignores all of them |
 | SOF DSP suspend/resume panic | preventive | [`sof-audio/`](sof-audio/) — upstream IPC4 backport; the race never reproduced on this unit |
@@ -28,13 +29,19 @@ kernel 7.1.5.
 initramfs, kernel cmdline, then the module-level fixes, and is the intended
 entry point for a fresh install. `uninstall_patch.sh` reverts it.
 
-The fingerprint and fan fixes are independent of the ACPI override and of each
-other, so they are not part of that sequence:
+The fingerprint, fan and OLED backlight fixes are independent of the ACPI
+override and of each other, so they are not part of that sequence:
 
 ```sh
 sudo bash patch/fingerprint/install.sh
 sudo bash patch/fan/install.sh
+sudo bash patch/oled-backlight/measure-floor.sh      # pick the value first
+sudo VBT_MIN=<value> bash patch/oled-backlight/install.sh
 ```
+
+The backlight fix needs a number measured on your own panel, which is why it
+is not part of the unattended sequence. See
+[`oled-backlight/README.md`](oled-backlight/README.md).
 
 ## Surviving updates
 
@@ -45,6 +52,7 @@ hand. `apply_patch.sh` installs it as its last step.
 |---|---|---|
 | `acpi-override/` | nothing, it is a firmware file | — |
 | `micmute/` | nothing, the BPF object is CO-RE | — |
+| `oled-backlight/` | nothing on a kernel update; a **BIOS** update invalidates the blob | re-run `install.sh` |
 | `fan/` | rebuilt automatically | DKMS |
 | `headset-mic/` | a kernel update leaves the new kernel without the overlay | `auto-rebuild/` hook |
 | `sof-audio/` | same | `auto-rebuild/` hook |

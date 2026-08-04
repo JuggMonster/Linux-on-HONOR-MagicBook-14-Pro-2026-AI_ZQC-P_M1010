@@ -13,6 +13,7 @@ own README, measurements, and installer.
 | Microphone mutes itself, mic-mute LED flickers | works | [`patch/micmute/`](patch/micmute/) — HID-BPF fixup for the touchscreen's vendor collection |
 | Fingerprint reader, Goodix `27c6:6f94` | works | [`patch/fingerprint/`](patch/fingerprint/) — two-line `libfprint` id patch |
 | Headset microphone, 3.5 mm jack | works | [`patch/headset-mic/`](patch/headset-mic/) — one-line `SND_PCI_QUIRK` for ALC256 |
+| OLED minimum brightness too low, uneven steps | works | [`patch/oled-backlight/`](patch/oled-backlight/) — patched VBT raises the firmware's backlight floor |
 | Fan RPM readout | works | [`patch/fan/`](patch/fan/) — `honor-zqcp-hwmon` |
 | Fan control | not available | the EC owns the fan curve and ignores every OS-side path, see [`patch/fan/README.md`](patch/fan/README.md) |
 | SOF DSP suspend/resume panic | preventive | [`patch/sof-audio/`](patch/sof-audio/) — upstream IPC4 backport, the race never reproduced here |
@@ -36,6 +37,7 @@ Bluetooth all work with no changes.
 | **CPU** | Intel® Core™ Ultra X9 388H ("Panther Lake") |
 | **PCH GPIO ID** | `INTC10BC` (five communities, gpiochip0..4) |
 | **BIOS** | HONOR 1.09 (2026-03-19) |
+| **Panel** | EDO 14.55" OLED, 3120x2080 at 120 Hz, backlight on native PWM at 200 Hz |
 | **Touchpad** | Goodix **TOPS0102** on `\_SB.PC00.I2C1.TPD0` (I²C HID, addr `0x5D`) |
 | **Touchscreen** | FocalTech **FTSC1000** on `\_SB.PC00.I2C2.TPL1` (I²C HID) |
 | **Fingerprint** | Goodix USB `27c6:6f94` — works with a two-line `libfprint` patch, see [`patch/fingerprint/`](patch/fingerprint/) |
@@ -80,12 +82,16 @@ sudo reboot
 `apply_patch.sh` is idempotent and backs up everything it replaces into a
 timestamped directory it prints at the end. `uninstall_patch.sh` reverts it.
 
-The fingerprint and fan fixes are independent of the ACPI override and are not
-part of that sequence:
+The fingerprint, fan and OLED backlight fixes are independent of the ACPI
+override and are not part of that sequence:
 
 ```bash
 sudo bash patch/fingerprint/install.sh
 sudo bash patch/fan/install.sh
+
+# the backlight floor has to be measured on your own panel first
+sudo bash patch/oled-backlight/measure-floor.sh
+sudo VBT_MIN=<value> bash patch/oled-backlight/install.sh
 ```
 
 ### What `apply_patch.sh` does
@@ -161,6 +167,8 @@ Details and the manual fallback are in
 | **Caps Lock LED stays dark** | `i8042.dumbkbd=1`, needed for the internal keyboard, also disables atkbd's `SET_LEDS` path, so the keyboard comes up without `EV_LED`. An upstream `atkbd` DMI quirk fixes the keyboard without the parameter and brings the LED back; verified on this unit, waiting to be merged. See [`patch/keyboard-atkbd/`](patch/keyboard-atkbd/) |
 | **Fan control is not possible** | the EC owns the fan curve. `SFNS` is gated on an `MFGM` flag no AML path ever sets, and the DPTF `TFN1` cooling device accepts writes that the EC ignores. Both tested, see [`patch/fan/README.md`](patch/fan/README.md) |
 | **Mic-mute LED follows the built-in array only** | the kernel's control-LED group tracks `Dmic0 Capture Switch` and lights the LED only when *every* attached control is muted. Mute the 3.5 mm jack input while it is not the default and the LED does not move. The built-in array is the default, so Fn+F7 works normally. See [`patch/headset-mic/README.md`](patch/headset-mic/README.md) |
+| **Brightness steps are not perceptually uniform** | the desktop divides `max_brightness` linearly, 20 steps of 5% on this panel, so the first step changes the light output far more than the rest. [`patch/oled-backlight/`](patch/oled-backlight/) removes the worst of it by raising the floor, but a perceptual curve has to come from the desktop, and PowerDevil rejected one by design |
+| **The very dim end is not usable** | this OLED does not render its firmware-declared minimum evenly. Raising the floor trades the darkest settings for an even image; there is no setting that gives both |
 | **MIPI / IPU6 cameras unconfigured** | no sensor on this SKU |
 | **NFC unusable** | the `NTAG0001` controller sits on I²C-1 and Linux has no driver for it |
 | **Some OEM helper ACPI devices disabled** | `INTC10CC` HID Discovery, `INTC10DF` TSE and similar are disabled by firmware and are not needed for any user-visible function |
@@ -321,6 +329,11 @@ HONOR_ZQC-P_M1010/
 │   │   ├── 95-honor-zqcp-kernel-modules.hook
 │   │   ├── 96-honor-zqcp-libfprint.hook
 │   │   └── install.sh
+│   ├── oled-backlight/             # firmware backlight floor is too low for this panel
+│   │   ├── vbt-min.py              #   inspect / patch brightness_min_level in a VBT
+│   │   ├── measure-floor.sh        #   find the lowest duty the panel renders evenly
+│   │   ├── install.sh              #   extract, patch, initramfs + cmdline
+│   │   └── uninstall.sh
 │   ├── micmute/                    # phantom KEY_MICMUTE from the touchscreen
 │   │   ├── honor-ftsc1000-micmute.bpf.c     # HID-BPF descriptor fixup
 │   │   └── install.sh              #   build + install via udev-hid-bpf
@@ -372,6 +385,7 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 |---|---|---|---|
 | CPU — Intel Core Ultra X9 388H (Panther Lake) | `intel_pstate`, `intel_idle`, `coretemp` | Intel Processor | ✅ |
 | Integrated GPU — Intel Arc B390 | PCI `8086:b080`, `xe` (modern Xe driver) | Intel Arc Graphics | ✅ |
+| Internal panel — EDO 14.55" OLED, 3120x2080 120 Hz | eDP-1, `intel_backlight` (native PWM, 200 Hz, `max_brightness` 704) | Intel Arc Graphics | ⚠️ *works, but the VBT declares a 2.4% minimum this panel cannot render evenly — see [`patch/oled-backlight/`](patch/oled-backlight/)* |
 | Intel NPU (AI accelerator) | PCI `8086:b03e`, `intel_vpu` | Intel AI Boost | ✅ |
 | Intel Platform Monitoring Telemetry | PCI `8086:b07d`, `intel_vsec`, `intel_pmc_ssram_telemetry` | Intel PMT | ✅ |
 | Intel Innovation Platform Framework (DTT) | PCI `8086:b01d`, `proc_thermal_pci` | Intel Dynamic Tuning | ✅ |
