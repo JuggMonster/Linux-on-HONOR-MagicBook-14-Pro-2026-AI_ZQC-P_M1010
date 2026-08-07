@@ -186,13 +186,15 @@ against 22 for the EC-driven right edge, so brightness moves at roughly half
 the pace volume does. That is what the touchpad sends; nothing here throttles
 it.
 
-**Boot-time attach is not proven yet.** The sibling fixup in
-[`../micmute/`](../micmute/) needs a service to re-apply itself, because a
-descriptor rewrite only takes effect if `hid_bpf_reconnect()` reprobes the
-device, and at boot that race is lost. A device event hook has no such
-dependency: it only has to be attached. That should make the service
-unnecessary here, but it has not been confirmed across a reboot yet. After the
-next one, check:
+**Boot-time attach needs no help**, unlike the sibling fixup in
+[`../micmute/`](../micmute/). That one ships a service to re-apply itself,
+because a descriptor rewrite only takes effect if `hid_bpf_reconnect()`
+reprobes the device, and at boot that race is lost. A device event hook has no
+such dependency: it only has to be attached.
+
+Confirmed across a reboot on this unit. Both programs came back attached, and
+45 seconds of sliding produced 141 brightness key presses and 123 backlight
+changes, so no re-apply service is needed here.
 
 ```sh
 sudo udev-hid-bpf list-loaded | grep honor_tops0102

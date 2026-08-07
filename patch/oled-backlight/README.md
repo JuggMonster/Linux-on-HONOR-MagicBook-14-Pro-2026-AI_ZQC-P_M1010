@@ -316,7 +316,11 @@ not luminance. What each desktop's floor actually produces on this panel:
 | factory VBT, min 6/255 | 2.56% duty | 3.41% duty |
 | **patched, min 12/255** | **4.83% duty** | **5.68% duty** |
 
-The measured clean threshold is 3.98%. Before the patch *both* desktops sat
+The measured clean threshold is 3.98%. GNOME's floor is not just a code
+reading: watching the backlight value while walking the range down shows it
+stopping at `41 -> 7` and going no further, never reaching 0.
+
+Before the patch *both* desktops sat
 below it, which is why the same blotches show up under GNOME and KDE alike.
 After it both are clear of it, and the difference between the two desktops is
 17% in light output rather than the 7x it looks like in raw units. So there is
