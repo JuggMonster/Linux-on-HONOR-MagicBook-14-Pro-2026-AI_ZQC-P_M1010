@@ -126,7 +126,12 @@ panel by eye at each level:
 
 The transition is sharp and sits between 3.55% and 3.98%. The shipped default
 is **12/255 = 4.69%**, two steps of margin above it, which also covers a darker
-room and panel to panel variation.
+room and panel to panel variation. A second ZQC-P reported the same crossover
+point, "cleaner after 3.55%", so the number is not specific to one unit.
+
+Verified end to end on the reference unit: booted with the patched blob,
+`parse_lfp_backlight()` logged `min brightness 12`, and the bottom of the range
+renders cleanly where it used to be blotchy.
 
 What that does to the 20 step scale a desktop lays over the range:
 
@@ -172,23 +177,61 @@ already enough to restore stock behaviour.
 ## Verifying after reboot
 
 ```sh
-# the parameter is on the cmdline
-grep -o 'xe.vbt_firmware=[^ ]*' /proc/cmdline
+# 1. the parameter reached the driver
+cat /sys/module/xe/parameters/vbt_firmware
 
-# the driver accepted the blob — this must print nothing
-sudo dmesg | grep -i 'VBT firmware'
+# 2. request_firmware() succeeded at probe. A failure here is drm_err and is
+#    printed unconditionally, so silence plus a set parameter is a good sign
+journalctl -k -b | grep -i 'VBT firmware'
 
-# and the floor moved: the bottom of the range should be visibly brighter.
-# Use 1, not 0 — writing 0 powers the panel off instead of dimming it.
+# 3. the blob is in the initramfs. xe is loaded from there by the kms hook,
+#    before the root filesystem exists, so this is where it has to be
+sudo lsinitcpio /boot/*/linux-cachyos/initramfs | grep zqc-p-vbt
+
+# 4. the floor moved. Use 1, not 0 — writing 0 powers the panel off
 echo 1 | sudo tee /sys/class/backlight/intel_backlight/brightness
 ```
 
-To read back what the driver is now using:
+For proof rather than inference, boot once with `drm.debug=0x4` appended to the
+kernel command line. `parse_lfp_backlight()` logs what it read:
 
-```sh
-sudo cp /sys/kernel/debug/dri/0/i915_vbt /tmp/vbt.bin
-python3 patch/oled-backlight/vbt-min.py show /tmp/vbt.bin
 ```
+$ journalctl -k -b | grep -i 'VBT backlight PWM'
+xe 0000:00:02.0: [drm] VBT backlight PWM modulation frequency 200 Hz, \
+    active high, min brightness 12, level 35, controller 0
+```
+
+`min brightness 12` means the patched blob was used. `min brightness 6` means
+it was not, and the driver fell back to the firmware's own copy.
+
+### Do not verify with debugfs
+
+Reading `/sys/kernel/debug/dri/0/i915_vbt` looks like the obvious check and it
+is worthless. The node does not dump what the driver parsed at probe, it calls
+`intel_bios_get_vbt()`, which starts with a fresh `request_firmware()`:
+
+```c
+static int intel_bios_vbt_show(struct seq_file *m, void *unused)
+{
+	vbt = intel_bios_get_vbt(display, &vbt_size);
+	...
+}
+
+static const struct vbt_header *intel_bios_get_vbt(struct intel_display *display,
+						   size_t *sizep)
+{
+	vbt = firmware_get_vbt(display, sizep);
+	if (!vbt)
+		vbt = intel_opregion_get_vbt(display, sizep);
+	...
+}
+```
+
+By the time you read it the root filesystem is mounted, so it reports the file
+currently on disk even if the boot time load failed and the driver is running
+on the factory VBT. Demonstrated here: with a kernel booted on a 12/255 blob,
+replacing the file on disk with a 20/255 one and re-reading the node returned
+20/255, while the boot log still said `min brightness 12`.
 
 ## What this does not do
 
@@ -211,7 +254,39 @@ and drive the sysfs node yourself.
 
 **It costs you the very dim end.** The panel does not render its rated minimum
 cleanly, so the choice is between dim and blotchy, and slightly brighter and
-even. Pick the floor with `measure-floor.sh` rather than maximising it.
+even. Pick the floor with `measure-floor.sh` rather than maximising it, and
+mind the ceiling in the next section.
+
+## Do not raise the floor too far
+
+There is an upper bound, and it is not obvious. HONOR advertises 4320 Hz
+"flicker free" dimming for this panel and states that it engages **only at low
+screen brightness**. That is the panel's own behaviour, layered under the
+200 Hz PWM the SoC drives.
+
+Photographed at 1/1250 s by [@inko32](https://github.com/inko32) on a second
+ZQC-P: both the thick 200 Hz banding and thin high frequency banding are
+present at 88/704 (12.5% duty), and the thin banding is gone at 105/704
+(14.9%). So the panel leaves its high frequency mode somewhere between those
+two, and above it you are left with the bare 200 Hz envelope.
+
+Which means "pick a high floor to be safe" is bad advice on this machine:
+
+| VBT value | duty | |
+|---|---|---|
+| 6/255 | 2.41% | factory, blotchy |
+| 10/255 | 3.98% | first clean level measured here |
+| **12/255** | **4.69%** | shipped default, well inside the high frequency region |
+| 30/255 | 11.7% | practical ceiling, still inside it |
+| 38/255 | 14.9% | high frequency dimming is gone, 200 Hz only |
+
+Keep the floor below roughly 30/255. The driver would let you go to 64/255,
+which is deep into the wrong side of that boundary.
+
+Above about 15% the panel flickers at 200 Hz and there is nothing the VBT can
+do about it: `cnp_setup_backlight()` takes the PWM period from the
+`BXT_BLC_PWM_FREQ` register the BIOS already programmed, and only falls back to
+the VBT frequency field if that register reads zero.
 
 **A BIOS update invalidates the blob.** The installed VBT is a copy of the one
 that shipped with the BIOS present at install time. `install.sh` records the

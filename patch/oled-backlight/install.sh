@@ -75,6 +75,14 @@ log "DMI matches HONOR ZQC-P, BIOS $BIOS"
 [[ "$VBT_MIN" =~ ^[0-9]+$ ]] || die "VBT_MIN must be a number, got '$VBT_MIN'"
 (( VBT_MIN >= 1 && VBT_MIN <= 64 )) || \
     die "VBT_MIN must be 1..64 (i915 clamps the VBT minimum to 64/255)"
+# The panel's own 4320 Hz dimming only runs at low brightness and is gone
+# somewhere around 15% duty, so a high floor trades blotches for 200 Hz
+# flicker. See README, "Do not raise the floor too far".
+if (( VBT_MIN > 30 )); then
+    warn "VBT_MIN ${VBT_MIN}/255 is above the practical ceiling of 30/255:
+    past roughly 15% duty the panel drops out of its high frequency dimming
+    mode and you are left with the bare 200 Hz PWM. Continuing anyway."
+fi
 
 # --- 2. Which driver owns the panel -------------------------------------------
 DRV=""
@@ -199,15 +207,27 @@ $(printf '\033[1;32m==>\033[0m') done. Reboot to pick it up.
 
 After the reboot:
 
-  # the parameter is on the cmdline
-  grep -o '${DRV}\.vbt_firmware=[^ ]*' /proc/cmdline
+  # the parameter reached the driver
+  cat /sys/module/${DRV}/parameters/vbt_firmware
 
-  # the driver accepted the blob (this must print nothing)
-  sudo dmesg | grep -i 'VBT firmware'
+  # request_firmware() succeeded at probe (a failure is drm_err, always printed)
+  journalctl -k -b | grep -i 'VBT firmware'
 
-  # and 0% is now visibly brighter than it was. Use 1, not 0: writing 0 to the
-  # backlight node switches the panel off entirely rather than dimming it.
+  # the blob travelled in the initramfs, which is where probe looks for it
+  sudo lsinitcpio /boot/*/linux-cachyos/initramfs | grep ${FW_NAME}
+
+  # the floor moved. Use 1, not 0: writing 0 switches the panel off entirely
+  # rather than selecting the lowest level.
   echo 1 | sudo tee $BL/brightness
+
+For proof rather than inference, boot once with drm.debug=0x4 and read what
+parse_lfp_backlight() logged:
+
+  journalctl -k -b | grep -i 'VBT backlight PWM'      # expect: min brightness ${VBT_MIN}
+
+Do NOT check /sys/kernel/debug/dri/0/i915_vbt. That node re-runs
+request_firmware() when you read it, so it reports the file on disk rather than
+what the driver parsed at boot. See README.
 
 To change the level, re-run with a different VBT_MIN. To revert entirely, run
 uninstall.sh in this directory.

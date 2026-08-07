@@ -36,7 +36,7 @@ Bluetooth all work with no changes.
 | **DMI version** | M1010 |
 | **CPU** | Intel® Core™ Ultra X9 388H ("Panther Lake") |
 | **PCH GPIO ID** | `INTC10BC` (five communities, gpiochip0..4) |
-| **BIOS** | HONOR 1.09 (2026-03-19) |
+| **BIOS** | HONOR 1.10 (2026-06-03) |
 | **Panel** | EDO 14.55" OLED, 3120x2080 at 120 Hz, backlight on native PWM at 200 Hz |
 | **Touchpad** | Goodix **TOPS0102** on `\_SB.PC00.I2C1.TPD0` (I²C HID, addr `0x5D`) |
 | **Touchscreen** | FocalTech **FTSC1000** on `\_SB.PC00.I2C2.TPL1` (I²C HID) |
@@ -169,6 +169,7 @@ Details and the manual fallback are in
 | **Mic-mute LED follows the built-in array only** | the kernel's control-LED group tracks `Dmic0 Capture Switch` and lights the LED only when *every* attached control is muted. Mute the 3.5 mm jack input while it is not the default and the LED does not move. The built-in array is the default, so Fn+F7 works normally. See [`patch/headset-mic/README.md`](patch/headset-mic/README.md) |
 | **Brightness steps are not perceptually uniform** | the desktop divides `max_brightness` linearly, 20 steps of 5% on this panel, so the first step changes the light output far more than the rest. [`patch/oled-backlight/`](patch/oled-backlight/) removes the worst of it by raising the floor, but a perceptual curve has to come from the desktop, and PowerDevil rejected one by design |
 | **The very dim end is not usable** | this OLED does not render its firmware-declared minimum evenly. Raising the floor trades the darkest settings for an even image; there is no setting that gives both |
+| **200 Hz backlight PWM above roughly 15% brightness** | the panel's own 4320 Hz dimming, which HONOR advertises as flicker free, only runs at low brightness. Above it the 200 Hz envelope from the SoC is all that remains, and it cannot be changed: the driver takes the PWM period from the `BXT_BLC_PWM_FREQ` register the BIOS programmed, consulting the VBT frequency field only when that register reads zero |
 | **MIPI / IPU6 cameras unconfigured** | no sensor on this SKU |
 | **NFC unusable** | the `NTAG0001` controller sits on I²C-1 and Linux has no driver for it |
 | **Some OEM helper ACPI devices disabled** | `INTC10CC` HID Discovery, `INTC10DF` TSE and similar are disabled by firmware and are not needed for any user-visible function |
@@ -385,7 +386,7 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 |---|---|---|---|
 | CPU — Intel Core Ultra X9 388H (Panther Lake) | `intel_pstate`, `intel_idle`, `coretemp` | Intel Processor | ✅ |
 | Integrated GPU — Intel Arc B390 | PCI `8086:b080`, `xe` (modern Xe driver) | Intel Arc Graphics | ✅ |
-| Internal panel — EDO 14.55" OLED, 3120x2080 120 Hz | eDP-1, `intel_backlight` (native PWM, 200 Hz, `max_brightness` 704) | Intel Arc Graphics | ⚠️ *works, but the VBT declares a 2.4% minimum this panel cannot render evenly — see [`patch/oled-backlight/`](patch/oled-backlight/)* |
+| Internal panel — EDO 14.55" OLED, 3120x2080 120 Hz | eDP-1, `intel_backlight` (native PWM, 200 Hz, `max_brightness` 704) | Intel Arc Graphics | ✅ *needs this patch* — the VBT declares a 2.4% minimum this panel cannot render evenly, see [`patch/oled-backlight/`](patch/oled-backlight/) |
 | Intel NPU (AI accelerator) | PCI `8086:b03e`, `intel_vpu` | Intel AI Boost | ✅ |
 | Intel Platform Monitoring Telemetry | PCI `8086:b07d`, `intel_vsec`, `intel_pmc_ssram_telemetry` | Intel PMT | ✅ |
 | Intel Innovation Platform Framework (DTT) | PCI `8086:b01d`, `proc_thermal_pci` | Intel Dynamic Tuning | ✅ |

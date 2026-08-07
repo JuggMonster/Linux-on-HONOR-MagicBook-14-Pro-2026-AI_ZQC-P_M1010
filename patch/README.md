@@ -5,7 +5,7 @@ Each subdirectory is one self-contained fix: the patch or source it needs, an
 the way it does. Every installer is safe to re-run and locates its own files,
 so it can be invoked directly from anywhere.
 
-Developed and tested on BIOS 1.09, Core Ultra X9 388H (Panther Lake), CachyOS,
+Developed and tested on BIOS 1.10, Core Ultra X9 388H (Panther Lake), CachyOS,
 kernel 7.1.5.
 
 ## Status
