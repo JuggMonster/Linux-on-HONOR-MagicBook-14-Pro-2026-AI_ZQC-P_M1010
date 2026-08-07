@@ -1,0 +1,21 @@
+# Keep the panel from being switched off through the brightness node.
+#
+# intel_backlight_device_update_status() decides on the user value, before any
+# scaling, so the VBT floor cannot cover this case:
+#
+#	bool enable = bd->props.power == BACKLIGHT_POWER_ON &&
+#		      bd->props.brightness != 0;
+#	panel->backlight.power(connector, enable);
+#
+# Writing 0 therefore blanks the display rather than selecting the lowest
+# level. Both KDE and GNOME avoid it on purpose; brightnessctl, light and
+# assorted scripts do not.
+#
+# This fires only on exactly 0, so it never interferes with the rest of the
+# range and cannot loop: the write of 1 raises another event that no longer
+# matches. Use bl_power to turn the panel off deliberately.
+#
+# Installed by patch/oled-backlight/install.sh only when GUARD_ZERO=1.
+
+ACTION=="add|change", SUBSYSTEM=="backlight", KERNEL=="intel_backlight", \
+    ATTR{brightness}=="0", ATTR{brightness}="1"

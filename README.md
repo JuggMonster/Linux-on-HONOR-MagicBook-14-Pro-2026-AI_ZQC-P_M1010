@@ -101,6 +101,7 @@ sudo VBT_MIN=10 ./apply_patch.sh             # a different backlight floor
 | `SKIP_FAN=1` | no fan RPM readout |
 | `SKIP_FINGERPRINT=1` | no `libfprint` rebuild, by far the slowest step |
 | `VBT_MIN=<n>` | backlight floor in n/255, default 12. Measure yours first with `patch/oled-backlight/measure-floor.sh` |
+| `GUARD_ZERO=1` | add a udev rule that bounces a write of `0` to the backlight back to `1`. Writing 0 blanks the panel rather than dimming it, and no VBT value can prevent that. Off by default |
 
 Each fix also has its own installer, if you would rather apply one on its own:
 

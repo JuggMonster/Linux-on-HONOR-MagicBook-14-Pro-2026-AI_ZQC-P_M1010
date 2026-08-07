@@ -160,6 +160,19 @@ else
 fi
 echo "    $(grep -E '^FILES=' /etc/mkinitcpio.conf)"
 
+# --- 5b. optional guard against a write of exactly 0 --------------------------
+# The panel power decision is made on the user value before scaling, so the VBT
+# floor cannot cover it. Opt-in, because it also overrides a deliberate blank
+# through this interface; bl_power is the proper way to do that.
+GUARD_RULE=/etc/udev/rules.d/99-honor-zqcp-backlight-nonzero.rules
+if [[ "${GUARD_ZERO:-0}" == "1" ]]; then
+    install -Dm644 "${SRC_DIR}/99-honor-zqcp-backlight-nonzero.rules" "$GUARD_RULE"
+    udevadm control --reload
+    log "installed the zero guard ($GUARD_RULE)"
+elif [[ -f "$GUARD_RULE" ]]; then
+    log "zero guard already present, leaving it (rm it to drop the guard)"
+fi
+
 # --- 6. kernel command line ---------------------------------------------------
 CMDLINE_ARG="${DRV}.vbt_firmware=${FW_PARAM}"
 if [[ -f /etc/default/limine ]]; then

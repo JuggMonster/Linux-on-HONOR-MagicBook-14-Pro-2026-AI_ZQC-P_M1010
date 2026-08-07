@@ -257,6 +257,100 @@ cleanly, so the choice is between dim and blotchy, and slightly brighter and
 even. Pick the floor with `measure-floor.sh` rather than maximising it, and
 mind the ceiling in the next section.
 
+## Three floors in the stack, only one of them matters
+
+This causes recurring confusion, so it is worth writing down. Three different
+layers each impose a minimum, and they are not equivalent.
+
+| layer | floor | when it applies |
+|---|---|---|
+| **kernel, from the VBT** | `panel->backlight.min`, 33/704 here after the patch | **every write**, it maps the sysfs range `[0..max]` onto `[min..max]` |
+| systemd-backlight | `ID_BACKLIGHT_CLAMP` udev property, default 1% of max | only when restoring the saved level at boot |
+| the desktop | KDE 1, GNOME `max/100` | only for what that desktop writes |
+
+Only the first one applies to everything, which is why this fix lives there.
+
+The desktop floors are in raw sysfs units and are chosen blind:
+
+```c
+/* powerdevil, daemon/controllers/backlightbrightness.cpp */
+int BacklightBrightness::knownSafeMinBrightness() const
+{
+    // Some laptop displays have been known to turn off completely when set to 0.
+    // ... Use 1 as the lowest value that we're actually sure won't turn off the display.
+    return 1;
+}
+```
+
+```c
+/* mutter, src/backends/meta-backlight-sysfs.c */
+max = g_udev_device_get_sysfs_attr_as_int (device, "max_brightness");
+min = MAX (1, max / 100);
+```
+
+Neither reads the VBT, and neither can: **the kernel does not export the
+hardware minimum at all.** `struct backlight_properties` has `brightness`,
+`max_brightness`, `power`, `type`, `scale` and `state`, and the sysfs attribute
+group is exactly
+
+```c
+static struct attribute *bl_device_attrs[] = {
+	&dev_attr_bl_power.attr,
+	&dev_attr_brightness.attr,
+	&dev_attr_actual_brightness.attr,
+	&dev_attr_max_brightness.attr,
+	&dev_attr_scale.attr,
+	&dev_attr_type.attr,
+	NULL,
+};
+```
+
+There is no minimum in either. `panel->backlight.min` exists only inside the
+driver.
+
+None of that matters once the VBT floor is right, because those raw values are
+not luminance. What each desktop's floor actually produces on this panel:
+
+| | KDE writes 1 | GNOME writes 7 |
+|---|---|---|
+| factory VBT, min 6/255 | 2.56% duty | 3.41% duty |
+| **patched, min 12/255** | **4.83% duty** | **5.68% duty** |
+
+The measured clean threshold is 3.98%. Before the patch *both* desktops sat
+below it, which is why the same blotches show up under GNOME and KDE alike.
+After it both are clear of it, and the difference between the two desktops is
+17% in light output rather than the 7x it looks like in raw units. So there is
+nothing desktop-specific to configure.
+
+### The one thing the VBT cannot cover
+
+Writing exactly `0`. That decision is made on the **user** value, before any
+scaling:
+
+```c
+/* intel_backlight_device_update_status() */
+bool enable = bd->props.power == BACKLIGHT_POWER_ON &&
+              bd->props.brightness != 0;
+panel->backlight.power(connector, enable);
+```
+
+so no VBT value can prevent it. Both desktops avoid 0 deliberately, but
+`brightnessctl set 0`, a script or another tool will blank the panel. If you
+want that closed, the installer can add a guard that only ever fires on exactly
+zero:
+
+```sh
+sudo GUARD_ZERO=1 bash patch/oled-backlight/install.sh
+```
+
+It is opt-in because it also overrides a deliberate blank through this
+interface. The proper way to turn the panel off is `bl_power`, which the guard
+does not touch.
+
+Measured here: a write of 0 comes back as 1 after about 400 ms, which is udev
+latency, so the panel does blank for a moment before recovering. It is a net
+that catches a mistake, not something that makes 0 behave like a level.
+
 ## Do not raise the floor too far
 
 There is an upper bound, and it is not obvious. HONOR advertises 4320 Hz

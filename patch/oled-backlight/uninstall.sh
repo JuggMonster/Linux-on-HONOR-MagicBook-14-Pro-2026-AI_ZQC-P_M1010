@@ -34,7 +34,9 @@ log "[2/5] Drop the blob from the initramfs file list"
 sed -i "/^FILES=/ { s#${FW_PATH} *##; s#^FILES=( *)#FILES=()#; }" /etc/mkinitcpio.conf
 echo "    $(grep -E '^FILES=' /etc/mkinitcpio.conf)"
 
-log "[3/5] Remove the installed firmware blob"
+log "[3/5] Remove the installed firmware blob and the optional zero guard"
+rm -fv /etc/udev/rules.d/99-honor-zqcp-backlight-nonzero.rules
+udevadm control --reload 2>/dev/null || true
 rm -fv "$FW_PATH"
 rmdir --ignore-fail-on-non-empty "$FW_DIR" 2>/dev/null || true
 rm -fv "${STATE_DIR}/vbt-patched.bin" "${STATE_DIR}/oled-backlight.stamp"
