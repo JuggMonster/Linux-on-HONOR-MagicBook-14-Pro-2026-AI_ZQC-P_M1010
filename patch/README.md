@@ -17,6 +17,7 @@ kernel 7.1.5.
 | Fingerprint reader, Goodix `27c6:6f94` | works | [`fingerprint/`](fingerprint/) — two-line `libfprint` id patch |
 | Headset microphone, 3.5 mm jack | works | [`headset-mic/`](headset-mic/) — one-line `SND_PCI_QUIRK` for ALC256 |
 | OLED minimum brightness too low, uneven steps | works | [`oled-backlight/`](oled-backlight/) — patched VBT raises the firmware's backlight floor |
+| Touchpad left-edge slide does nothing | works | [`touchpad-edge/`](touchpad-edge/) — HID-BPF turns the vendor gesture report into brightness keys |
 | Fan RPM readout | works | [`fan/`](fan/) — `honor-zqcp-hwmon` module |
 | Fan control | not available | [`fan/README.md`](fan/README.md) — every OS-side path was tested, the EC ignores all of them |
 | SOF DSP suspend/resume panic | preventive | [`sof-audio/`](sof-audio/) — upstream IPC4 backport; the race never reproduced on this unit |
@@ -25,23 +26,20 @@ kernel 7.1.5.
 
 ## Installing
 
-`apply_patch.sh` in the repository root runs the full sequence, ACPI override,
-initramfs, kernel cmdline, then the module-level fixes, and is the intended
-entry point for a fresh install. `uninstall_patch.sh` reverts it.
+`apply_patch.sh` in the repository root runs all of them in one go and is the
+intended entry point for a fresh install. `uninstall_patch.sh` reverts it.
+Every step after the ACPI override is independent and only warns on failure.
 
-The fingerprint, fan and OLED backlight fixes are independent of the ACPI
-override and of each other, so they are not part of that sequence:
+Optional steps: `SKIP_OLED=1`, `SKIP_EDGE=1`, `SKIP_FAN=1`,
+`SKIP_FINGERPRINT=1`. The backlight floor defaults to `VBT_MIN=12`, measured on
+two units; run [`oled-backlight/measure-floor.sh`](oled-backlight/measure-floor.sh)
+if you want to check it against your own panel.
+
+Each installer also stands alone and is safe to re-run:
 
 ```sh
-sudo bash patch/fingerprint/install.sh
-sudo bash patch/fan/install.sh
-sudo bash patch/oled-backlight/measure-floor.sh      # pick the value first
-sudo VBT_MIN=<value> bash patch/oled-backlight/install.sh
+sudo bash patch/touchpad-edge/install.sh
 ```
-
-The backlight fix needs a number measured on your own panel, which is why it
-is not part of the unattended sequence. See
-[`oled-backlight/README.md`](oled-backlight/README.md).
 
 ## Surviving updates
 
@@ -52,6 +50,7 @@ hand. `apply_patch.sh` installs it as its last step.
 |---|---|---|
 | `acpi-override/` | nothing, it is a firmware file | — |
 | `micmute/` | nothing, the BPF object is CO-RE | — |
+| `touchpad-edge/` | nothing, the BPF object is CO-RE | — |
 | `oled-backlight/` | nothing on a kernel update; a **BIOS** update invalidates the blob | re-run `install.sh` |
 | `fan/` | rebuilt automatically | DKMS |
 | `headset-mic/` | a kernel update leaves the new kernel without the overlay | `auto-rebuild/` hook |

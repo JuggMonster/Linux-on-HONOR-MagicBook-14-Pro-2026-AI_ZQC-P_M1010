@@ -45,14 +45,19 @@ else
     echo "    kept ${STATE_DIR}/vbt-factory.bin (PURGE=1 to remove it)"
 fi
 
-log "[4/5] Regenerate the initramfs"
-mkinitcpio -P
+# uninstall_patch.sh regenerates once at the end, so it calls us with REGEN=0.
+if (( ${REGEN:-1} )); then
+    log "[4/5] Regenerate the initramfs"
+    mkinitcpio -P
 
-log "[5/5] Update the bootloader config"
-if command -v limine-update >/dev/null; then
-    limine-update
+    log "[5/5] Update the bootloader config"
+    if command -v limine-update >/dev/null; then
+        limine-update
+    else
+        echo "    limine-update not found, skipped"
+    fi
 else
-    echo "    limine-update not found, skipped"
+    log "[4/5] skipping the initramfs rebuild (REGEN=0), the caller will do it"
 fi
 
 cat <<EOF

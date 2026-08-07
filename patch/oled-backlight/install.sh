@@ -180,11 +180,17 @@ else
 fi
 
 # --- 7. regenerate ------------------------------------------------------------
-log "regenerating the initramfs"
-mkinitcpio -P
-if command -v limine-update >/dev/null; then
-    log "updating the Limine config"
-    limine-update
+# apply_patch.sh runs this step itself once, after every config edit, so it
+# calls us with REGEN=0 to avoid rebuilding the initramfs twice.
+if (( ${REGEN:-1} )); then
+    log "regenerating the initramfs"
+    mkinitcpio -P
+    if command -v limine-update >/dev/null; then
+        log "updating the Limine config"
+        limine-update
+    fi
+else
+    log "skipping the initramfs rebuild (REGEN=0), the caller will do it"
 fi
 
 cat > "$STAMP" <<EOF

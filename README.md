@@ -14,6 +14,7 @@ own README, measurements, and installer.
 | Fingerprint reader, Goodix `27c6:6f94` | works | [`patch/fingerprint/`](patch/fingerprint/) — two-line `libfprint` id patch |
 | Headset microphone, 3.5 mm jack | works | [`patch/headset-mic/`](patch/headset-mic/) — one-line `SND_PCI_QUIRK` for ALC256 |
 | OLED minimum brightness too low, uneven steps | works | [`patch/oled-backlight/`](patch/oled-backlight/) — patched VBT raises the firmware's backlight floor |
+| Touchpad left-edge slide (brightness gesture) | works | [`patch/touchpad-edge/`](patch/touchpad-edge/) — HID-BPF turns the vendor gesture report into brightness keys. The right edge (volume) goes through the EC and works unaided |
 | Fan RPM readout | works | [`patch/fan/`](patch/fan/) — `honor-zqcp-hwmon` |
 | Fan control | not available | the EC owns the fan curve and ignores every OS-side path, see [`patch/fan/README.md`](patch/fan/README.md) |
 | SOF DSP suspend/resume panic | preventive | [`patch/sof-audio/`](patch/sof-audio/) — upstream IPC4 backport, the race never reproduced here |
@@ -79,38 +80,55 @@ sudo ./apply_patch.sh
 sudo reboot
 ```
 
-`apply_patch.sh` is idempotent and backs up everything it replaces into a
+That is the whole thing. `apply_patch.sh` installs every fix in this
+repository, is idempotent, and backs up everything it replaces into a
 timestamped directory it prints at the end. `uninstall_patch.sh` reverts it.
 
-The fingerprint, fan and OLED backlight fixes are independent of the ACPI
-override and are not part of that sequence:
+Every step after the ACPI override is independent and only warns on failure,
+so a step that cannot build never blocks the rest.
+
+Optional steps can be turned off, and the backlight floor can be overridden:
 
 ```bash
-sudo bash patch/fingerprint/install.sh
-sudo bash patch/fan/install.sh
+sudo SKIP_FINGERPRINT=1 ./apply_patch.sh     # skip the slowest step
+sudo VBT_MIN=10 ./apply_patch.sh             # a different backlight floor
+```
 
-# the backlight floor has to be measured on your own panel first
-sudo bash patch/oled-backlight/measure-floor.sh
-sudo VBT_MIN=<value> bash patch/oled-backlight/install.sh
+| Variable | Effect |
+|---|---|
+| `SKIP_OLED=1` | leave the OLED backlight floor at the firmware value |
+| `SKIP_EDGE=1` | leave the touchpad left-edge brightness gesture dead |
+| `SKIP_FAN=1` | no fan RPM readout |
+| `SKIP_FINGERPRINT=1` | no `libfprint` rebuild, by far the slowest step |
+| `VBT_MIN=<n>` | backlight floor in n/255, default 12. Measure yours first with `patch/oled-backlight/measure-floor.sh` |
+
+Each fix also has its own installer, if you would rather apply one on its own:
+
+```bash
+sudo bash patch/touchpad-edge/install.sh
 ```
 
 ### What `apply_patch.sh` does
 
 | Step | Action |
 |---|---|
-| 1 | Installs `patch/acpi-override/SSDT27_TPD0.aml` into `/usr/lib/firmware/acpi/` |
-| 2 | Installs the `acpi_override` mkinitcpio hook into `/etc/initcpio/install/` |
+| 1 | Backs up everything about to be touched |
+| 2 | Installs `patch/acpi-override/SSDT27_TPD0.aml` into `/usr/lib/firmware/acpi/` and the `acpi_override` mkinitcpio hook |
 | 3 | Adds `acpi_override` to `HOOKS=` in `/etc/mkinitcpio.conf`, right after `autodetect` |
 | 4 | Appends `i8042.dumbkbd=1` to the kernel cmdline in `/etc/default/limine` |
-| 5 | Regenerates the initramfs and the bootloader config |
-| 6 | Runs `patch/headset-mic/install.sh` — rebuilds `snd-hda-codec-alc269.ko` with the ALC256 quirk for PCI SSID `1ee7:209d` |
-| 7 | Runs `patch/sof-audio/install.sh` — builds `snd-sof.ko` with the IPC4 backport into the `updates/` overlay |
-| 8 | Runs `patch/micmute/install.sh` — builds and installs the HID-BPF descriptor fixup through `udev-hid-bpf` |
-| 9 | Runs `patch/auto-rebuild/install.sh` — installs the pacman hooks that keep steps 6, 7 and the fingerprint patch applied across package updates |
+| 5 | Runs `patch/oled-backlight/install.sh` — patched VBT, `FILES=` entry and `xe.vbt_firmware=` on the cmdline |
+| 6 | Regenerates the initramfs and the bootloader config, once, after all the config edits |
+| 7 | Runs `patch/headset-mic/install.sh` — rebuilds `snd-hda-codec-alc269.ko` with the ALC256 quirk for PCI SSID `1ee7:209d` |
+| 8 | Runs `patch/sof-audio/install.sh` — builds `snd-sof.ko` with the IPC4 backport into the `updates/` overlay |
+| 9 | Runs `patch/micmute/install.sh` — builds and installs the HID-BPF descriptor fixup through `udev-hid-bpf` |
+| 10 | Runs `patch/touchpad-edge/install.sh` — HID-BPF program for the left-edge brightness gesture |
+| 11 | Runs `patch/fan/install.sh` — `honor-zqcp-hwmon`, EC fan tachometers, through DKMS |
+| 12 | Runs `patch/fingerprint/install.sh` — rebuilds `libfprint` with the Goodix `27c6:6f94` id |
+| 13 | Runs `patch/auto-rebuild/install.sh` — pacman hooks that keep steps 7, 8 and 12 applied across package updates |
 
-Steps 6 and 7 are skipped with a warning if kernel lockdown or
-`module.sig_enforce=1` would block an unsigned module. Step 9 is skipped on
-non-pacman systems.
+Steps 7 and 8 are skipped with a warning if kernel lockdown or
+`module.sig_enforce=1` would block an unsigned module. Steps 12 and 13 are
+skipped on non-pacman systems.
 
 ### Verifying after reboot
 
@@ -335,6 +353,9 @@ HONOR_ZQC-P_M1010/
 │   │   ├── measure-floor.sh        #   find the lowest duty the panel renders evenly
 │   │   ├── install.sh              #   extract, patch, initramfs + cmdline
 │   │   └── uninstall.sh
+│   ├── touchpad-edge/              # left-edge slide gesture -> brightness keys
+│   │   ├── honor-tops0102-edge.bpf.c   # HID-BPF device-event hook
+│   │   └── install.sh              #   build + install via udev-hid-bpf
 │   ├── micmute/                    # phantom KEY_MICMUTE from the touchscreen
 │   │   ├── honor-ftsc1000-micmute.bpf.c     # HID-BPF descriptor fixup
 │   │   └── install.sh              #   build + install via udev-hid-bpf
@@ -435,6 +456,8 @@ on `linux-cachyos 7.0.8` (Panther Lake-aware) under CachyOS.
 | **Built-in keyboard** | ACPI `MSFT0001`/`PNP0303` → `i8042`, "AT Translated Set 2 keyboard" | Microsoft PS/2 Keyboard | ✅ *needs `i8042.dumbkbd=1`* |
 | Caps Lock LED | (keyboard-internal, driven via atkbd `SET_LEDS`) | (same) | ❌ *blocked by `i8042.dumbkbd=1` — see [Known limitations](#known-limitations)* |
 | Hotkey / function-key WMI | `huawei_wmi`, "Huawei WMI hotkeys" input | Huawei PC Manager hotkey driver | ✅ |
+| **Touchpad edge slide, right (volume)** | touchpad → EC → i8042 → `atkbd`, `KEY_VOLUMEUP/DOWN` on the internal keyboard device | HONOR PC Manager | ✅ works out of the box |
+| **Touchpad edge slide, left (brightness)** | vendor HID collection `0xff00`, report `0x0e`, ignored by `hid-input` | HONOR PC Manager | ✅ *needs this patch* — see [`patch/touchpad-edge/`](patch/touchpad-edge/) |
 | **Fn+F7 mic-mute key** | `huawei_wmi` WMI hot-key → `KEY_MICMUTE`; LED at `/sys/class/leds/platform::micmute` with `audio-micmute` trigger | Huawei PC Manager mic toggle | ✅ *works out of the box*; the LED only follows DMIC mute, not the analog headset mic |
 | **Phantom `KEY_MICMUTE`** | `hid-multitouch` exported the FTSC1000 touchscreen's `0xff01` vendor collection, which `hid-input` maps to `KEY_MICMUTE` | none — a FocalTech driver claims the collection | ✅ fixed by [`patch/micmute/`](patch/micmute/); without it the mic mutes itself continuously |
 | PS/2 mouse port (legacy) | ACPI `MSFT0003`, status=0 | (disabled by firmware) | ➖ disabled in firmware (correctly) |
